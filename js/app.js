@@ -131,7 +131,8 @@ async function cloudSaveProgress(name, progress) {
   const r = await fetch(`${CLOUD.url}/rest/v1/profiles?name=eq.${encodeURIComponent(key)}`, {
     method: 'PATCH',
     headers: cloudHeaders(),
-    body: JSON.stringify({ progress, updated_at: new Date().toISOString() })
+    // колонка в таблице называется data (jsonb) — прогресс лежит внутри неё
+    body: JSON.stringify({ data: { progress }, updated_at: new Date().toISOString() })
   });
   if (!r.ok) throw new Error('cloud_write_failed');
 }
@@ -197,21 +198,28 @@ async function login(name, pin) {
       await cloudUpsertProfile({
         name: key,
         pin_hash: hash,
-        progress: localProgress,
+        data: { progress: localProgress, display_name: name.trim() },
         updated_at: new Date().toISOString()
       });
     } else if (row.pin_hash !== hash) {
       throw new Error('Неверный ПИН для ника «' + name.trim() + '»');
     }
 
-    const cloudProgress = row ? (row.progress || {}) : {};
+    // прогресс в облаке лежит внутри поля data
+    const cloudData = (row && row.data) || {};
+    const cloudProgress = cloudData.progress || {};
     const localProgress = load(profileKeyOf(key, 'progress_v2'), {});
     const merged = mergeProgress(localProgress, cloudProgress);
 
     profile = name.trim().slice(0, 30);
     saveSession();
     save(profileKey('progress_v2'), merged);
-    await cloudSaveProgress(profile, merged);
+    // синхронизация сразу после входа; сетевой сбой не должен ломать вход
+    try {
+      await cloudSaveProgress(profile, merged);
+    } catch (e) {
+      console.warn('Не удалось сразу синхронизировать, повторится при следующем ответе', e);
+    }
   } else {
     // локальный режим (без облака)
     profile = name.trim().slice(0, 30);
