@@ -227,6 +227,7 @@ button { font-family: inherit; }
   padding: 16px;
   z-index: 50;
 }
+.modal[hidden] { display: none; } /* важно: display:flex выше перебивал атрибут hidden */
 .modal-box {
   background: #fff;
   border-radius: var(--radius);
@@ -243,3 +244,40 @@ button { font-family: inherit; }
   .add-form .row { flex-direction: column; }
   .card .word { font-size: 26px; }
 }
+
+/* ===== Вход ===== */
+.login { display: flex; align-items: center; justify-content: center; padding-top: 8vh; }
+.login[hidden] { display: none; }
+.login-box { max-width: 420px; }
+.login-box h2 { margin: 0 0 8px; }
+.login-box input { margin: 12px 0; }
+
+.user-chip {
+  background: rgba(255,255,255,.18);
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ===== Карточка: этимология и примеры ===== */
+.card .cat { margin-top: 8px; font-size: 12px; color: var(--muted); }
+.card .etym {
+  margin-top: 14px;
+  font-size: 13px;
+  font-style: italic;
+  color: var(--muted);
+  line-height: 1.45;
+}
+.card .examples {
+  margin: 12px 0 0;
+  padding-left: 18px;
+  text-align: left;
+  font-size: 14px;
+  line-height: 1.5;
+  color: #374151;
+}
+.card .examples li { margin-bottom: 5px; }

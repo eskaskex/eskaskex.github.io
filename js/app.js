@@ -4,11 +4,10 @@
 
 const INTERVALS = [0, 1, 3, 7, 14]; // дней между повторениями для коробок 1..5
 const SESSION_SIZE = 10;
-const LS_PROGRESS = 'erudit_progress_v1';
-const LS_CUSTOM = 'erudit_custom_v1';
 
+let profile = null;   // имя пользователя (сохраняется между визитами)
 let baseWords = [];   // из data/words.json
-let customWords = []; // свои слова (localStorage)
+let customWords = []; // свои слова текущего профиля
 let progress = {};    // id -> {box, correct, wrong, last_review}
 let session = null;
 
@@ -36,6 +35,57 @@ function load(key, fallback) {
 }
 function save(key, val) { localStorage.setItem(key, JSON.stringify(val)); }
 
+/* ================== ПРОФИЛИ И СЕССИЯ ================== */
+
+function profileKey(suffix) { return 'erudit_' + suffix + ':' + profile.toLowerCase(); }
+
+function loadSession() {
+  profile = localStorage.getItem('erudit_profile');
+}
+
+function saveSession() {
+  localStorage.setItem('erudit_profile', profile);
+}
+
+function logout() {
+  if (session) session = null;
+  localStorage.removeItem('erudit_profile');
+  profile = null;
+  showLogin();
+}
+
+function login(name) {
+  const oldProgress = load('erudit_progress_v1', null); // миграция прогресса до профилей
+  const oldCustom = load('erudit_custom_v1', null);
+
+  profile = name.trim().slice(0, 30);
+  saveSession();
+
+  if (!localStorage.getItem(profileKey('progress_v2'))) {
+    if (oldProgress) { save(profileKey('progress_v2'), oldProgress); }
+  }
+  if (!localStorage.getItem(profileKey('custom_v2'))) {
+    if (oldCustom) { save(profileKey('custom_v2'), oldCustom); }
+  }
+  loadState();
+  enterApp();
+}
+
+function showLogin() {
+  $('#login').hidden = false;
+  $('#tabs').hidden = true;
+  ['study', 'words', 'stats'].forEach((t) => { $('#tab-' + t).hidden = true; });
+  $('#user-chip').textContent = '';
+}
+
+function enterApp() {
+  $('#login').hidden = true;
+  $('#tabs').hidden = false;
+  $('#user-chip').textContent = profile;
+  switchTab('study');
+  renderAll();
+}
+
 /* ================== СЛОВА И ПРОГРЕСС ================== */
 
 function allWords() {
@@ -43,15 +93,15 @@ function allWords() {
 }
 
 function loadState() {
-  progress = load(LS_PROGRESS, {});
-  customWords = (load(LS_CUSTOM, []) || []).filter((w) => w && w.word && w.meaning);
+  progress = load(profileKey('progress_v2'), {});
+  customWords = (load(profileKey('custom_v2'), []) || []).filter((w) => w && w.word && w.meaning);
 }
 
 function prog(id) {
   return progress[id] || { box: 1, correct: 0, wrong: 0, last_review: null };
 }
 
-function saveProgress() { save(LS_PROGRESS, progress); }
+function saveProgress() { save(profileKey('progress_v2'), progress); }
 
 function daysSince(v) {
   if (!v) return Infinity;
@@ -76,6 +126,15 @@ function answer(id, correct) {
   p.last_review = new Date().toISOString();
   progress[id] = p;
   saveProgress();
+}
+
+/* Слово с ударением: «нонконформи́ст». Для «ё» метка не нужна. */
+function stressed(w) {
+  const word = w.word || '';
+  if (typeof w.stress !== 'number') return esc(word);
+  const i = Math.min(w.stress, word.length - 1);
+  if (word[i] === 'ё' || word[i] === 'Ё') return esc(word);
+  return esc(word.slice(0, i + 1)) + '\u0301' + esc(word.slice(i + 1));
 }
 
 /* ================== РЕНДЕР ================== */
@@ -106,9 +165,9 @@ function renderWords() {
     return `
     <div class="wordrow" data-id="${esc(w.id)}">
       <div class="w-main">
-        <b>${esc(w.word)}</b>
+        <b>${stressed(w)}</b>
         <span>${esc(w.meaning)}</span>
-        ${w.example ? `<em>${esc(w.example)}</em>` : ''}
+        ${w.category ? `<em>📁 ${esc(w.category)}</em>` : ''}
       </div>
       <div class="w-meta">📦 ${p.box || 1}<br>✓${p.correct || 0} ✗${p.wrong || 0}</div>
       <div class="w-actions">
@@ -142,7 +201,7 @@ function renderStats() {
     .filter((w) => (prog(w.id).wrong || 0) > 0).slice(0, 5);
   $('#worst').innerHTML = worst.map((w) => `
     <div class="wordrow">
-      <div class="w-main"><b>${esc(w.word)}</b><span>${esc(w.meaning)}</span></div>
+      <div class="w-main"><b>${stressed(w)}</b><span>${esc(w.meaning)}</span></div>
       <div class="w-meta">ошибок: ${prog(w.id).wrong}</div>
     </div>
   `).join('') || '<p class="muted">Пока нет данных — начни учиться!</p>';
@@ -189,11 +248,12 @@ function nextItem() {
 
   if (session.mode === 'cards') {
     $('#card').innerHTML = `
-      <div class="word">${esc(w.word)}</div>
+      <div class="word">${stressed(w)}</div>
+      ${w.category ? `<div class="cat">${esc(w.category)}</div>` : ''}
       <div class="hint">нажми на карточку, чтобы проверить себя</div>`;
   } else {
     $('#card').innerHTML = `
-      <div class="word">${esc(w.word)}</div>
+      <div class="word">${stressed(w)}</div>
       <div class="hint">выбери правильное значение</div>`;
     const seen = new Set([w.meaning]);
     const others = shuffle(allWords().filter((x) => !seen.has(x.meaning) && seen.add(x.meaning))).slice(0, 3);
@@ -212,7 +272,8 @@ function flipCard() {
   $('#card').classList.add('flipped');
   $('#card').innerHTML = `
     <div class="translation">${esc(w.meaning)}</div>
-    ${w.example ? `<div class="example">${esc(w.example)}</div>` : ''}
+    ${w.etymology ? `<div class="etym">📖 ${esc(w.etymology)}</div>` : ''}
+    ${w.examples && w.examples.length ? `<ul class="examples">${w.examples.map((e) => `<li>${esc(e)}</li>`).join('')}</ul>` : ''}
     <div class="hint">ты помнил значение?</div>`;
   $('#btn-no').hidden = false;
   $('#btn-know').hidden = false;
@@ -228,13 +289,12 @@ function onQuizAnswer(btn, w) {
     }
   });
   if (!ok) btn.classList.add('wrong');
-  setTimeout(() => answer(w.id, ok), ok ? 600 : 1200);
-  session.i++;
+  setTimeout(() => answer(w.id, ok), ok ? 500 : 1100);
   setTimeout(() => {
     if (!session) return;
-    if (session.i >= session.list.length) finishSession();
-    else nextItem();
-  }, ok ? 600 : 1400);
+    if (session.i >= session.list.length - 1) finishSession();
+    else { session.i++; nextItem(); }
+  }, ok ? 700 : 1400);
 }
 
 function finishSession() {
@@ -255,7 +315,7 @@ function exitSession() {
 
 /* ================== СВОИ СЛОВА ================== */
 
-async function onAddWord(e) {
+function onAddWord(e) {
   e.preventDefault();
   const word = $('#f-word').value.trim();
   const meaning = $('#f-tr').value.trim();
@@ -265,9 +325,9 @@ async function onAddWord(e) {
     word,
     meaning,
     category: $('#f-cat').value.trim(),
-    example: $('#f-ex').value.trim()
+    examples: [$('#f-ex').value.trim()].filter(Boolean)
   });
-  save(LS_CUSTOM, customWords);
+  save(profileKey('custom_v2'), customWords);
   $('#f-word').value = ''; $('#f-tr').value = ''; $('#f-cat').value = ''; $('#f-ex').value = '';
   renderAll();
 }
@@ -285,7 +345,7 @@ function onWordListClick(e) {
     if (!confirm(`Удалить «${w.word}»?`)) return;
     customWords.splice(idx, 1);
     delete progress[id];
-    save(LS_CUSTOM, customWords);
+    save(profileKey('custom_v2'), customWords);
     saveProgress();
     renderAll();
   }
@@ -296,7 +356,7 @@ function onWordListClick(e) {
     const nm = prompt('Значение:', w.meaning);
     if (nm === null) return;
     customWords[idx] = { ...w, word: nw.trim() || w.word, meaning: nm.trim() || w.meaning };
-    save(LS_CUSTOM, customWords);
+    save(profileKey('custom_v2'), customWords);
     renderAll();
   }
 }
@@ -304,11 +364,11 @@ function onWordListClick(e) {
 /* ================== ЭКСПОРТ / ИМПОРТ / СБРОС ================== */
 
 function exportData() {
-  const data = JSON.stringify({ app: 'erudit', version: 1, progress, customWords }, null, 2);
+  const data = JSON.stringify({ app: 'erudit', version: 2, profile, progress, customWords }, null, 2);
   const blob = new Blob([data], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'erudit-backup.json';
+  a.download = 'erudit-' + profile.toLowerCase() + '-backup.json';
   a.click();
   URL.revokeObjectURL(a.href);
 }
@@ -321,8 +381,10 @@ function importData(file) {
       if (data.progress) { progress = { ...progress, ...data.progress }; saveProgress(); }
       if (Array.isArray(data.customWords)) {
         const have = new Set(customWords.map((w) => w.id));
-        data.customWords.forEach((w) => { if (w && w.id && w.word && w.meaning && !have.has(w.id)) customWords.push(w); });
-        save(LS_CUSTOM, customWords);
+        data.customWords.forEach((w) => {
+          if (w && w.id && w.word && w.meaning && !have.has(w.id)) customWords.push(w);
+        });
+        save(profileKey('custom_v2'), customWords);
       }
       renderAll();
       alert('Данные загружены ✓');
@@ -334,7 +396,7 @@ function importData(file) {
 }
 
 function onResetProgress() {
-  if (!confirm('Точно сбросить прогресс всех слов? Сами слова останутся.')) return;
+  if (!confirm(`Точно сбросить весь прогресс «${profile}»? Сами слова останутся.`)) return;
   progress = {};
   saveProgress();
   renderAll();
@@ -344,7 +406,8 @@ function onResetProgress() {
 
 function openModal(msg) {
   $('#modal').hidden = false;
-  $('#modal-msg').textContent = msg || 'Прогресс хранится в этом браузере. Сделай резервную копию, чтобы не потерять его при очистке данных.';
+  $('#modal-msg').textContent = msg ||
+    `Ты вошёл как «${profile}». Прогресс хранится в этом браузере и сохраняется между визитами. Сделай резервную копию, чтобы не потерять его.`;
 }
 
 function closeModal() { $('#modal').hidden = true; }
@@ -352,6 +415,15 @@ function closeModal() { $('#modal').hidden = true; }
 /* ================== СТАРТ ================== */
 
 function bindUI() {
+  $('#login-btn').addEventListener('click', () => {
+    const name = $('#login-name').value.trim();
+    if (!name) { $('#login-name').focus(); return; }
+    login(name);
+  });
+  $('#login-name').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') $('#login-btn').click();
+  });
+
   $('#tabs').addEventListener('click', (e) => {
     const b = e.target.closest('button');
     if (b) switchTab(b.dataset.tab);
@@ -363,14 +435,14 @@ function bindUI() {
   $('#btn-know').addEventListener('click', () => {
     if (!session) return;
     answer(session.list[session.i].id, true);
-    session.i++;
-    if (session.i >= session.list.length) finishSession(); else nextItem();
+    if (session.i >= session.list.length - 1) finishSession();
+    else { session.i++; nextItem(); }
   });
   $('#btn-no').addEventListener('click', () => {
     if (!session) return;
     answer(session.list[session.i].id, false);
-    session.i++;
-    if (session.i >= session.list.length) finishSession(); else nextItem();
+    if (session.i >= session.list.length - 1) finishSession();
+    else { session.i++; nextItem(); }
   });
 
   $('#add-form').addEventListener('submit', onAddWord);
@@ -380,12 +452,14 @@ function bindUI() {
 
   $('#btn-settings').addEventListener('click', () => openModal());
   $('#modal-close').addEventListener('click', closeModal);
+  $('#modal').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeModal(); });
   $('#btn-export').addEventListener('click', exportData);
   $('#btn-import').addEventListener('click', () => $('#file-import').click());
   $('#file-import').addEventListener('change', (e) => {
     if (e.target.files[0]) importData(e.target.files[0]);
     e.target.value = '';
   });
+  $('#btn-logout').addEventListener('click', () => { closeModal(); logout(); });
 
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
@@ -395,17 +469,24 @@ function bindUI() {
 async function init() {
   bindUI();
   try {
-    baseWords = await fetch('data/words.json').then((r) => r.json());
+    const res = await fetch('data/words.json');
+    baseWords = await res.json();
   } catch (e) {
     baseWords = [];
     console.error('Не удалось загрузить базу слов', e);
   }
-  // дедупликация по слову
   const seen = new Set();
-  baseWords = baseWords.filter((w) => w && w.word && w.meaning && !seen.has(w.word.toLowerCase()) && seen.add(w.word.toLowerCase()));
-  baseWords = baseWords.map((w) => ({ ...w, id: 'w:' + w.word.toLowerCase() }));
-  loadState();
-  renderAll();
+  baseWords = baseWords
+    .filter((w) => w && w.word && w.meaning && !seen.has(w.word.toLowerCase()) && seen.add(w.word.toLowerCase()))
+    .map((w) => ({ ...w, id: 'w:' + w.word.toLowerCase() }));
+
+  loadSession();
+  if (profile) {
+    loadState();
+    enterApp();
+  } else {
+    showLogin();
+  }
 }
 
 init();

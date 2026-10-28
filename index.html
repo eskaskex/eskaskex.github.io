@@ -16,6 +16,7 @@
 <header class="topbar">
   <h1>🎓 Эрудит</h1>
   <div class="topbar-right">
+    <span id="user-chip" class="user-chip"></span>
     <span id="status" class="status">…</span>
     <button id="btn-settings" class="icon-btn" title="Настройки">⚙</button>
   </div>
@@ -28,6 +29,16 @@
 </nav>
 
 <main>
+
+  <!-- ====== ВХОД ====== -->
+  <section id="login" class="login" hidden>
+    <div class="panel login-box">
+      <h2>Добро пожаловать!</h2>
+      <p class="muted">Как тебя называть? Под этим именем сохранится твой прогресс — вход останется даже после закрытия сайта.</p>
+      <input id="login-name" maxlength="30" placeholder="Твоё имя" autocomplete="off">
+      <button id="login-btn" class="primary big">Начать учиться</button>
+    </div>
+  </section>
 
   <!-- ====== УЧИТЬСЯ ====== -->
   <section id="tab-study">
@@ -105,6 +116,7 @@
     <div class="modal-actions">
       <button id="btn-export" class="primary">⬇ Скачать копию (прогресс + свои слова)</button>
       <button id="btn-import" class="ghost">⬆ Загрузить копию</button>
+      <button id="btn-logout" class="ghost">🚪 Сменить пользователя</button>
       <button id="modal-close" class="ghost">Закрыть</button>
     </div>
     <input id="file-import" type="file" accept=".json,application/json" hidden>
