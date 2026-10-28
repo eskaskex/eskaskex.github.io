@@ -1,0 +1,45 @@
+name: Keep Supabase alive
+
+# Ежедневный «будильник» для бесплатной БД Supabase:
+# лёгкий REST-запрос считается активностью и не даёт проекту уйти в паузу
+# (Supabase замораживает проект после 7 дней без обращений).
+# Publishable key здесь можно держать открыто — он публичный по дизайну
+# и уже лежит в клиентском коде приложения.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # ежедневно в 06:00 UTC (09:00 МСК)
+  workflow_dispatch: {}   # можно запустить вручную: вкладка Actions → Run workflow
+
+permissions:
+  contents: write
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ping Supabase REST API
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "apikey: sb_publishable_L0uaWnGRcqw-WciOL-DqFw_KN98Kxx2" \
+            "https://pxxehvzvmjienobuhahx.supabase.co/rest/v1/words?select=id&limit=1")
+          echo "Supabase ping: HTTP $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "::error::Supabase ping failed"
+            exit 1
+          fi
+
+      # Раз в неделю (воскресенье) делаем микрокоммит — так GitHub не
+      # отключает расписание из-за «неактивности» репозитория.
+      - name: Weekly keepalive commit
+        run: |
+          if [ "$(date -u +%u)" = "7" ]; then
+            date -u > keepalive.txt
+            git config user.name "keepalive-bot"
+            git config user.email "actions@github.com"
+            git add keepalive.txt
+            git commit -m "keepalive: $(date -u +%F)" || echo "nothing to commit"
+            git push
+          fi
