@@ -287,7 +287,8 @@ async function loadWords() {
   try {
     const a = await fetch('data/words.json').then((r) => r.json());
     const b = await fetch('data/words-2.json').then((r) => r.json()).catch(() => []);
-    dictWords = [...a, ...b].map(normalizeWord);
+    const c = await fetch('data/words-3.json').then((r) => r.json()).catch(() => []);
+    dictWords = [...a, ...b, ...c].map(normalizeWord);
     save('erudit_words_cache', dictWords);
   } catch (e) {
     dictWords = [];
