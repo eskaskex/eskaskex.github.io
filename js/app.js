@@ -15,6 +15,10 @@ let progress = {};    // id -> {box, correct, wrong, last_review}
 let session = null;
 let syncTimer = null;
 
+// каталог
+let activeCategory = '';
+let viewMode = localStorage.getItem('erudit_view') || 'list';
+
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => document.querySelectorAll(s);
 
@@ -290,8 +294,24 @@ function renderStudy() {
 function renderWords() {
   const q = $('#search').value.trim().toLowerCase();
   const list = allWords().filter((w) =>
-    !q || (w.word + ' ' + w.meaning + ' ' + (w.category || '')).toLowerCase().includes(q)
+    (activeCategory === '' || (w.category || '') === activeCategory) &&
+    (!q || (w.word + ' ' + w.meaning + ' ' + (w.category || '')).toLowerCase().includes(q))
   );
+  $('#word-list').classList.toggle('grid', viewMode === 'grid');
+
+  if (viewMode === 'grid') {
+    $('#word-list').innerHTML = list.map((w) => {
+      const p = prog(w.id);
+      return `
+      <div class="gcard" data-id="${esc(w.id)}">
+        <div class="gw">${stressed(w)}</div>
+        <div class="gm">${esc(w.meaning)}</div>
+        <div class="gb">📦 ${p.box || 1}${w.category ? ' · ' + esc(w.category) : ''}</div>
+      </div>`;
+    }).join('') || '<p class="empty">Ничего не найдено</p>';
+    return;
+  }
+
   $('#word-list').innerHTML = list.map((w) => {
     const p = prog(w.id);
     const custom = customWords.some((c) => c.id === w.id);
@@ -311,24 +331,79 @@ function renderWords() {
   }).join('') || '<p class="empty">Ничего не найдено</p>';
 }
 
+function renderChips() {
+  const cats = [...new Set(allWords().map((w) => w.category).filter(Boolean))];
+  const counts = {};
+  allWords().forEach((w) => { if (w.category) counts[w.category] = (counts[w.category] || 0) + 1; });
+  $('#cat-chips').innerHTML = `
+    <button class="chip ${activeCategory === '' ? 'active' : ''}" data-cat="">Все (${allWords().length})</button>
+    ${cats.map((c) => `<button class="chip ${activeCategory === c ? 'active' : ''}" data-cat="${esc(c)}">${esc(c)} (${counts[c]})</button>`).join('')}`;
+}
+
+/* Полная карточка слова */
+function nextRepeatText(p) {
+  if (!p.last_review) return 'ещё не изучалось';
+  const remaining = INTERVALS[Math.min(4, (p.box || 1) - 1)] - daysSince(p.last_review);
+  return remaining <= 0 ? 'сегодня' : 'через ' + Math.ceil(remaining) + ' дн.';
+}
+
+function openWordCard(id) {
+  const w = allWords().find((x) => x.id === id);
+  if (!w) return;
+  const p = prog(w.id);
+  const custom = customWords.some((c) => c.id === w.id);
+  $('#word-full').innerHTML = `
+    <div class="wf-word">${stressed(w)}</div>
+    ${w.category ? `<div class="wf-cat">📁 ${esc(w.category)}</div>` : ''}
+    <div class="wf-meaning">${esc(w.meaning)}</div>
+    ${w.etymology ? `<div class="etym">📖 <b>Происхождение.</b> ${esc(w.etymology)}</div>` : ''}
+    ${w.examples && w.examples.length ? `<ul class="examples">${w.examples.map((e) => `<li>${esc(e)}</li>`).join('')}</ul>` : ''}
+    <div class="wf-progress">
+      <span>📦 коробка ${p.box || 1}</span>
+      <span>✓ ${p.correct || 0}</span>
+      <span>✗ ${p.wrong || 0}</span>
+      <span>🔁 ${nextRepeatText(p)}</span>
+    </div>
+    ${custom ? `<div class="wf-actions"><button class="ghost" data-act="edit">✎ Редактировать</button><button class="ghost danger-outline" data-act="del">🗑 Удалить</button></div>` : ''}
+    <button id="wf-close" class="primary">Закрыть</button>
+  `;
+  $('#word-modal').hidden = false;
+}
+
+function closeWordCard() { $('#word-modal').hidden = true; }
+
 function renderStats() {
   const all = allWords();
-  const total = all.length;
-  const learned = all.filter((w) => (prog(w.id).box || 1) >= 4).length;
+  const box = (w) => prog(w.id).box || 1;
+  const learned = all.filter((w) => box(w) >= 4).length;
+  const learning = all.filter((w) => box(w) === 2 || box(w) === 3).length;
   const due = dueWords().length;
-  $('#stat-total').textContent = total;
+  $('#stat-total').textContent = all.length;
   $('#stat-learned').textContent = learned;
+  $('#stat-learning').textContent = learning;
   $('#stat-due').textContent = due;
 
-  const counts = [1, 2, 3, 4, 5].map((b) => all.filter((w) => (prog(w.id).box || 1) === b).length);
-  const max = Math.max(1, ...counts);
-  $('#boxes').innerHTML = counts.map((c, i) => `
-    <div class="boxcol">
-      <div class="bnum">${c}</div>
-      <div class="bar" style="height:${Math.max(4, Math.round(c / max * 100))}%"></div>
-      <div class="blabel">№${i + 1}</div>
-    </div>
-  `).join('');
+  const labels = [
+    ['1', 'Каждый день', 'новые и проблемные слова'],
+    ['2', 'Раз в день', 'слово начало закрепляться'],
+    ['3', 'Раз в 3 дня', 'уже почти помнишь'],
+    ['4', 'Раз в неделю', 'уверенно помнишь'],
+    ['5', 'Раз в 2 недели', 'слово освоено ✅']
+  ];
+  $('#boxes').innerHTML = labels.map(([n, title, desc]) => {
+    const c = all.filter((w) => box(w) === Number(n)).length;
+    const share = all.length ? Math.round(c / all.length * 100) : 0;
+    return `
+    <div class="boxrow">
+      <span class="boxbadge b${n}">${n}</span>
+      <div class="boxinfo">
+        <b>${title}</b>
+        <span>${desc}</span>
+        <div class="boxbar"><i style="width:${share}%"></i></div>
+      </div>
+      <div class="boxcount">${c}</div>
+    </div>`;
+  }).join('');
 
   const worst = [...all].sort((a, b) => (prog(b.id).wrong || 0) - (prog(a.id).wrong || 0))
     .filter((w) => (prog(w.id).wrong || 0) > 0).slice(0, 5);
@@ -347,6 +422,8 @@ function switchTab(name) {
   ['study', 'words', 'stats'].forEach((t) => {
     $('#tab-' + t).hidden = t !== name;
   });
+  if (name === 'stats') renderStats();
+  if (name === 'words') { renderChips(); renderWords(); }
   window.scrollTo(0, 0);
 }
 
@@ -467,33 +544,41 @@ function onAddWord(e) {
 }
 
 function onWordListClick(e) {
-  const btn = e.target.closest('button[data-act]');
-  if (!btn) return;
-  const row = btn.closest('.wordrow');
+  const row = e.target.closest('.wordrow, .gcard');
+  if (!row) return;
   const id = row.dataset.id;
-  const idx = customWords.findIndex((x) => x.id === id);
-  if (idx < 0) return;
-  const w = customWords[idx];
 
-  if (btn.dataset.act === 'del') {
-    if (!confirm(`Удалить «${w.word}»?`)) return;
-    customWords.splice(idx, 1);
-    delete progress[id];
-    save(profileKey('custom_v2'), customWords);
-    saveProgress();
-    renderAll();
+  // кнопки правки/удаления — только для своих слов
+  const actBtn = e.target.closest('button[data-act]');
+  if (actBtn) {
+    const idx = customWords.findIndex((x) => x.id === id);
+    if (idx < 0) return;
+    const w = customWords[idx];
+
+    if (actBtn.dataset.act === 'del') {
+      if (!confirm(`Удалить «${w.word}»?`)) return;
+      customWords.splice(idx, 1);
+      delete progress[id];
+      save(profileKey('custom_v2'), customWords);
+      saveProgress();
+      renderAll();
+    }
+
+    if (actBtn.dataset.act === 'edit') {
+      const nw = prompt('Слово:', w.word);
+      if (nw === null) return;
+      const nm = prompt('Значение:', w.meaning);
+      if (nm === null) return;
+      customWords[idx] = { ...w, word: nw.trim() || w.word, meaning: nm.trim() || w.meaning };
+      save(profileKey('custom_v2'), customWords);
+      renderAll();
+      queueSync();
+    }
+    return;
   }
 
-  if (btn.dataset.act === 'edit') {
-    const nw = prompt('Слово:', w.word);
-    if (nw === null) return;
-    const nm = prompt('Значение:', w.meaning);
-    if (nm === null) return;
-    customWords[idx] = { ...w, word: nw.trim() || w.word, meaning: nm.trim() || w.meaning };
-    save(profileKey('custom_v2'), customWords);
-    renderAll();
-    queueSync();
-  }
+  // обычный клик по слову — полная карточка
+  openWordCard(id);
 }
 
 /* ================== ЭКСПОРТ / ИМПОРТ / СБРОС ================== */
@@ -600,6 +685,31 @@ function bindUI() {
   $('#search').addEventListener('input', renderWords);
   $('#word-list').addEventListener('click', onWordListClick);
   $('#btn-reset').addEventListener('click', onResetProgress);
+
+  // каталог: переключение списка/сетки и фильтр по категориям
+  function setView(mode) {
+    viewMode = mode;
+    localStorage.setItem('erudit_view', mode);
+    $('#view-list').classList.toggle('active', mode === 'list');
+    $('#view-grid').classList.toggle('active', mode === 'grid');
+    renderWords();
+  }
+  $('#view-list').addEventListener('click', () => setView('list'));
+  $('#view-grid').addEventListener('click', () => setView('grid'));
+  $('#view-list').classList.toggle('active', viewMode === 'list');
+  $('#view-grid').classList.toggle('active', viewMode === 'grid');
+  $('#cat-chips').addEventListener('click', (e) => {
+    const chip = e.target.closest('.chip');
+    if (!chip) return;
+    activeCategory = chip.dataset.cat || '';
+    renderChips();
+    renderWords();
+  });
+
+  // полная карточка слова
+  $('#word-modal').addEventListener('click', (e) => {
+    if (e.target === e.currentTarget || e.target.id === 'wf-close') closeWordCard();
+  });
 
   $('#btn-settings').addEventListener('click', () => openModal());
   $('#modal-close').addEventListener('click', closeModal);

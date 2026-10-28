@@ -71,7 +71,7 @@
     </div>
   </section>
 
-  <!-- ====== СЛОВА ====== -->
+  <!-- ====== СЛОВА (КАТАЛОГ) ====== -->
   <section id="tab-words" hidden>
     <form id="add-form" class="panel add-form">
       <input id="f-word" placeholder="Слово (например: квинтэссенция)" autocomplete="off" required>
@@ -82,22 +82,31 @@
       </div>
       <button class="primary" type="submit">＋ Добавить слово</button>
     </form>
-    <input id="search" class="search" placeholder="🔍 Поиск слова или значения" autocomplete="off">
+
+    <div class="catalog-bar">
+      <input id="search" class="search" placeholder="🔍 Поиск слова или значения" autocomplete="off">
+      <div class="view-toggle">
+        <button id="view-list" title="Список">☰</button>
+        <button id="view-grid" title="Сетка">▦</button>
+      </div>
+    </div>
+    <div id="cat-chips" class="cat-chips"></div>
     <div id="word-list"></div>
   </section>
 
   <!-- ====== СТАТИСТИКА ====== -->
   <section id="tab-stats" hidden>
     <div class="statgrid">
-      <div class="panel statcard"><div id="stat-total" class="statnum">0</div><span>всего слов</span></div>
-      <div class="panel statcard"><div id="stat-learned" class="statnum ok">0</div><span>выучено</span></div>
-      <div class="panel statcard"><div id="stat-due" class="statnum warn">0</div><span>к повторению</span></div>
+      <div class="panel statcard"><div id="stat-total" class="statnum">0</div><span>📚 всего слов</span></div>
+      <div class="panel statcard"><div id="stat-learned" class="statnum ok">0</div><span>✅ освоено</span></div>
+      <div class="panel statcard"><div id="stat-learning" class="statnum">0</div><span>🌱 изучается</span></div>
+      <div class="panel statcard"><div id="stat-due" class="statnum warn">0</div><span>⏰ к повторению</span></div>
     </div>
 
     <div class="panel">
-      <h3>Коробки повторения</h3>
-      <div id="boxes" class="boxes"></div>
-      <p class="muted">Слово переходит в следующую коробку, если ты его знаешь. Ошибка — и слово возвращается в первую.</p>
+      <h3>Как растут слова</h3>
+      <p class="muted">Ответил верно — слово переходит в следующую коробку и показывается реже. Ошибка — возвращается в первую коробку.</p>
+      <div id="boxes" class="box-rows"></div>
     </div>
 
     <div class="panel">
@@ -109,6 +118,12 @@
   </section>
 
 </main>
+
+<!-- ====== ПОЛНАЯ КАРТОЧКА СЛОВА ====== -->
+<div id="word-modal" class="modal" hidden>
+  <div class="modal-box word-full" id="word-full"></div>
+</div>
+
 <!-- ====== МОДАЛКА ДАННЫХ ====== -->
 <div id="modal" class="modal" hidden>
   <div class="modal-box">

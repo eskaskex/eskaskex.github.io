@@ -198,9 +198,7 @@ button { font-family: inherit; }
 .empty { text-align: center; color: var(--muted); padding: 24px 0; }
 
 /* ===== Статистика ===== */
-.statgrid { display: flex; gap: 10px; margin-bottom: 14px; }
-.statcard { flex: 1; text-align: center; padding: 14px 8px; }
-.statnum { font-size: 28px; font-weight: 700; }
+.statnum { font-size: 26px; font-weight: 700; }
 .statnum.ok { color: var(--success); }
 .statnum.warn { color: var(--warn); }
 .statcard span { font-size: 12px; color: var(--muted); }
@@ -281,3 +279,112 @@ button { font-family: inherit; }
   color: #374151;
 }
 .card .examples li { margin-bottom: 5px; }
+
+/* ===== Каталог слов ===== */
+.catalog-bar { display: flex; gap: 8px; margin-bottom: 10px; }
+.catalog-bar .search { flex: 1; margin-bottom: 0; }
+.view-toggle {
+  display: flex; gap: 4px;
+  background: var(--card);
+  border-radius: 10px; padding: 4px;
+  box-shadow: 0 1px 3px rgba(30,27,58,.06);
+}
+.view-toggle button {
+  border: none; background: none;
+  padding: 6px 12px; border-radius: 8px;
+  cursor: pointer; font-size: 16px; color: var(--muted);
+}
+.view-toggle button.active { background: var(--accent); color: #fff; }
+
+.cat-chips {
+  display: flex; gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 10px;
+  margin-bottom: 4px;
+  -webkit-overflow-scrolling: touch;
+}
+.chip {
+  border: 1px solid #e5e7eb;
+  background: var(--card);
+  border-radius: 999px;
+  padding: 7px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  color: var(--text);
+  font-family: inherit;
+}
+.chip.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+/* Сетка */
+#word-list.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+@media (min-width: 640px) { #word-list.grid { grid-template-columns: repeat(3, 1fr); } }
+.gcard {
+  background: var(--card);
+  border-radius: 12px;
+  padding: 12px;
+  cursor: pointer;
+  display: flex; flex-direction: column; gap: 6px;
+  box-shadow: 0 1px 3px rgba(30,27,58,.06);
+}
+.gcard .gw { font-weight: 700; font-size: 16px; }
+.gcard .gm {
+  font-size: 12.5px; color: var(--muted); line-height: 1.4; flex: 1;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.gcard .gb { font-size: 11px; color: var(--accent); }
+
+/* ===== Полная карточка слова ===== */
+.word-full { max-height: 86vh; overflow-y: auto; }
+.wf-word { font-size: 28px; font-weight: 700; }
+.wf-cat { margin-top: 6px; font-size: 12px; color: var(--muted); }
+.wf-meaning { margin-top: 12px; font-size: 16px; line-height: 1.5; }
+.wf-progress {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  margin-top: 14px;
+  font-size: 12.5px; color: var(--muted);
+}
+.wf-progress span {
+  background: #f3f4f6;
+  border-radius: 8px;
+  padding: 5px 10px;
+}
+.wf-actions { display: flex; gap: 8px; margin-top: 10px; }
+.wf-actions .ghost { border: 1px solid #e5e7eb; }
+.word-full .primary { margin-top: 12px; }
+
+/* ===== Статистика: коробки ===== */
+.statgrid { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+.statcard { flex: 1 1 40%; text-align: center; padding: 14px 8px; }
+
+.box-rows { display: flex; flex-direction: column; gap: 10px; }
+.boxrow {
+  display: flex; gap: 12px; align-items: center;
+  background: #f9fafb;
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+.boxbadge {
+  width: 34px; height: 34px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-weight: 700; font-size: 15px;
+  flex-shrink: 0;
+}
+.boxbadge.b1 { background: #f87171; }
+.boxbadge.b2 { background: #fb923c; }
+.boxbadge.b3 { background: #fbbf24; }
+.boxbadge.b4 { background: #4ade80; }
+.boxbadge.b5 { background: #16a34a; }
+.boxinfo { flex: 1; min-width: 0; }
+.boxinfo b { display: block; font-size: 14px; }
+.boxinfo span { font-size: 12px; color: var(--muted); }
+.boxbar {
+  margin-top: 6px;
+  height: 6px;
+  background: #e5e7eb;
+  border-radius: 999px;
+  overflow: hidden;
+}
+.boxbar i { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+.boxcount { font-size: 20px; font-weight: 700; flex-shrink: 0; }
