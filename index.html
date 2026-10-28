@@ -34,8 +34,9 @@
   <section id="login" class="login" hidden>
     <div class="panel login-box">
       <h2>Добро пожаловать!</h2>
-      <p class="muted">Как тебя называть? Под этим именем сохранится твой прогресс — вход останется даже после закрытия сайта.</p>
-      <input id="login-name" maxlength="30" placeholder="Твоё имя" autocomplete="off">
+      <p class="muted" id="login-hint">Как тебя называть?</p>
+      <input id="login-name" maxlength="30" placeholder="Ник" autocomplete="off">
+      <input id="login-pin" maxlength="20" placeholder="ПИН-код (минимум 4 символа)" autocomplete="off" hidden>
       <button id="login-btn" class="primary big">Начать учиться</button>
     </div>
   </section>
@@ -123,6 +124,7 @@
   </div>
 </div>
 
+<script src="js/cloud-config.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

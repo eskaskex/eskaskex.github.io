@@ -5,11 +5,15 @@
 const INTERVALS = [0, 1, 3, 7, 14]; // дней между повторениями для коробок 1..5
 const SESSION_SIZE = 10;
 
+const CLOUD = window.CLOUD || {};
+const cloudEnabled = !!(CLOUD.url && CLOUD.key);
+
 let profile = null;   // имя пользователя (сохраняется между визитами)
 let baseWords = [];   // из data/words.json
 let customWords = []; // свои слова текущего профиля
 let progress = {};    // id -> {box, correct, wrong, last_review}
 let session = null;
+let syncTimer = null;
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => document.querySelectorAll(s);
@@ -35,6 +39,94 @@ function load(key, fallback) {
 }
 function save(key, val) { localStorage.setItem(key, JSON.stringify(val)); }
 
+async function sha256(s) {
+  try {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('erudit:' + s));
+    return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  } catch (e) {
+    // запасной вариант без crypto.subtle (например, file://)
+    let h = 5381;
+    for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+    return 'x' + h.toString(16);
+  }
+}
+
+/* ================== ОБЛАКО (Supabase REST) ================== */
+
+function cloudHeaders(extra = {}) {
+  return {
+    apikey: CLOUD.key,
+    Authorization: 'Bearer ' + CLOUD.key,
+    'Content-Type': 'application/json',
+    ...extra
+  };
+}
+
+async function cloudGet(name) {
+  const key = name.toLowerCase();
+  const r = await fetch(`${CLOUD.url}/rest/v1/profiles?select=*&name=eq.${encodeURIComponent(key)}`, {
+    headers: cloudHeaders()
+  });
+  if (!r.ok) throw new Error('cloud_read_failed');
+  const rows = await r.json();
+  return rows[0] || null;
+}
+
+async function cloudUpsert(row) {
+  const r = await fetch(`${CLOUD.url}/rest/v1/profiles`, {
+    method: 'POST',
+    headers: cloudHeaders({ Prefer: 'resolution=merge-duplicates' }),
+    body: JSON.stringify(row)
+  });
+  if (!r.ok) throw new Error('cloud_write_failed');
+}
+
+async function cloudSaveData(name, data) {
+  const key = name.toLowerCase();
+  const r = await fetch(`${CLOUD.url}/rest/v1/profiles?name=eq.${encodeURIComponent(key)}`, {
+    method: 'PATCH',
+    headers: cloudHeaders(),
+    body: JSON.stringify({ data, updated_at: new Date().toISOString() })
+  });
+  if (!r.ok) throw new Error('cloud_write_failed');
+}
+
+function snapshot() {
+  return { display_name: profile, progress, customWords, updated_at: new Date().toISOString() };
+}
+
+/* Отложенная выгрузка прогресса в облако (чтобы не дёргать сеть на каждый ответ) */
+function queueSync() {
+  if (!cloudEnabled || !profile) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(async () => {
+    try {
+      await cloudSaveData(profile, snapshot());
+      $('#status').textContent = '☁ сохранено';
+      setTimeout(() => renderStudy(), 1500);
+    } catch (e) {
+      console.warn('Облако недоступно, прогресс сохранён локально', e);
+      $('#status').textContent = '☁ офлайн';
+      setTimeout(() => renderStudy(), 1500);
+    }
+  }, 2000);
+}
+
+/* Слияние локального и облачного прогресса: побеждает более свежий ответ */
+function mergeData(localProgress, localCustom, cloudData) {
+  const merged = { ...(cloudData.progress || {}) };
+  for (const [id, lp] of Object.entries(localProgress || {})) {
+    const cp = merged[id];
+    if (!cp || !cp.last_review || new Date(lp.last_review || 0) > new Date(cp.last_review || 0)) {
+      merged[id] = lp;
+    }
+  }
+  const cloudCustom = cloudData.customWords || [];
+  const have = new Set(cloudCustom.map((w) => w.id));
+  const union = [...cloudCustom, ...(localCustom || []).filter((w) => !have.has(w.id))];
+  return { progress: merged, customWords: union };
+}
+
 /* ================== ПРОФИЛИ И СЕССИЯ ================== */
 
 function profileKey(suffix) { return 'erudit_' + suffix + ':' + profile.toLowerCase(); }
@@ -48,34 +140,72 @@ function saveSession() {
 }
 
 function logout() {
-  if (session) session = null;
+  session = null;
   localStorage.removeItem('erudit_profile');
   profile = null;
   showLogin();
 }
 
-function login(name) {
-  const oldProgress = load('erudit_progress_v1', null); // миграция прогресса до профилей
-  const oldCustom = load('erudit_custom_v1', null);
+async function login(name, pin) {
+  if (cloudEnabled) {
+    const key = name.trim().toLowerCase();
+    const hash = await sha256(key + ':' + pin);
+    const row = await cloudGet(key);
 
-  profile = name.trim().slice(0, 30);
-  saveSession();
+    if (!row) {
+      // новый профиль — создаём, подтягивая локальный прогресс этого устройства, если был
+      const localProgress = load('erudit_progress_v1', {}) || load(profileKeyOf(key, 'progress_v2'), {});
+      const localCustom = load('erudit_custom_v1', []) || load(profileKeyOf(key, 'custom_v2'), []);
+      await cloudUpsert({
+        name: key,
+        pin_hash: hash,
+        data: { display_name: name.trim(), progress: localProgress, customWords: localCustom, updated_at: new Date().toISOString() }
+      });
+    } else if (row.pin_hash !== hash) {
+      throw new Error('Неверный ПИН для ника «' + name.trim() + '»');
+    }
 
-  if (!localStorage.getItem(profileKey('progress_v2'))) {
-    if (oldProgress) { save(profileKey('progress_v2'), oldProgress); }
+    // подтягиваем облачные данные и сливаем с локальными
+    const data = row ? (row.data || {}) : {};
+    const localProgress = load(profileKeyOf(key, 'progress_v2'), {});
+    const localCustom = load(profileKeyOf(key, 'custom_v2'), []);
+    const merged = mergeData(localProgress, localCustom, data);
+
+    profile = name.trim().slice(0, 30);
+    saveSession();
+    save(profileKey('progress_v2'), merged.progress);
+    save(profileKey('custom_v2'), merged.customWords);
+    await cloudSaveData(profile, snapshot()); // облако получает слияние
+  } else {
+    // локальный режим (без облака)
+    profile = name.trim().slice(0, 30);
+    saveSession();
+    // миграция прогресса до профилей
+    if (!localStorage.getItem(profileKey('progress_v2'))) {
+      const oldProgress = load('erudit_progress_v1', null);
+      if (oldProgress) save(profileKey('progress_v2'), oldProgress);
+      const oldCustom = load('erudit_custom_v1', null);
+      if (oldCustom) save(profileKey('custom_v2'), oldCustom);
+    }
   }
-  if (!localStorage.getItem(profileKey('custom_v2'))) {
-    if (oldCustom) { save(profileKey('custom_v2'), oldCustom); }
-  }
+
   loadState();
   enterApp();
 }
+
+/* ключи хранилища для произвольного имени (нужны до назначения profile) */
+function profileKeyOf(name, suffix) { return 'erudit_' + suffix + ':' + name.toLowerCase(); }
 
 function showLogin() {
   $('#login').hidden = false;
   $('#tabs').hidden = true;
   ['study', 'words', 'stats'].forEach((t) => { $('#tab-' + t).hidden = true; });
   $('#user-chip').textContent = '';
+
+  $('#login-pin').hidden = !cloudEnabled;
+  $('#login-hint').textContent = cloudEnabled
+    ? 'Придумай ник и ПИН-код. С того же ника и ПИНа твой прогресс откроется на любом устройстве.'
+    : 'Как тебя называть? Под этим именем сохранится твой прогресс на этом устройстве.';
 }
 
 function enterApp() {
@@ -101,7 +231,10 @@ function prog(id) {
   return progress[id] || { box: 1, correct: 0, wrong: 0, last_review: null };
 }
 
-function saveProgress() { save(profileKey('progress_v2'), progress); }
+function saveProgress() {
+  save(profileKey('progress_v2'), progress);
+  queueSync();
+}
 
 function daysSince(v) {
   if (!v) return Infinity;
@@ -330,6 +463,7 @@ function onAddWord(e) {
   save(profileKey('custom_v2'), customWords);
   $('#f-word').value = ''; $('#f-tr').value = ''; $('#f-cat').value = ''; $('#f-ex').value = '';
   renderAll();
+  queueSync();
 }
 
 function onWordListClick(e) {
@@ -358,6 +492,7 @@ function onWordListClick(e) {
     customWords[idx] = { ...w, word: nw.trim() || w.word, meaning: nm.trim() || w.meaning };
     save(profileKey('custom_v2'), customWords);
     renderAll();
+    queueSync();
   }
 }
 
@@ -387,6 +522,7 @@ function importData(file) {
         save(profileKey('custom_v2'), customWords);
       }
       renderAll();
+      queueSync();
       alert('Данные загружены ✓');
     } catch (e) {
       alert('Не удалось прочитать файл: ' + e.message);
@@ -407,7 +543,9 @@ function onResetProgress() {
 function openModal(msg) {
   $('#modal').hidden = false;
   $('#modal-msg').textContent = msg ||
-    `Ты вошёл как «${profile}». Прогресс хранится в этом браузере и сохраняется между визитами. Сделай резервную копию, чтобы не потерять его.`;
+    (cloudEnabled
+      ? `Ты вошёл как «${profile}». Прогресс синхронизируется с облаком по нику и ПИН-коду — на другом устройстве войди тем же ником и ПИНом.`
+      : `Ты вошёл как «${profile}». Прогресс хранится в этом браузере. Сделай резервную копию, чтобы не потерять его.`);
 }
 
 function closeModal() { $('#modal').hidden = true; }
@@ -415,14 +553,27 @@ function closeModal() { $('#modal').hidden = true; }
 /* ================== СТАРТ ================== */
 
 function bindUI() {
-  $('#login-btn').addEventListener('click', () => {
+  $('#login-btn').addEventListener('click', async () => {
     const name = $('#login-name').value.trim();
+    const pin = $('#login-pin').value.trim();
     if (!name) { $('#login-name').focus(); return; }
-    login(name);
+    if (cloudEnabled && (pin.length < 4)) { $('#login-hint').textContent = 'ПИН-код — минимум 4 символа. Он защищает твой прогресс.'; $('#login-pin').focus(); return; }
+    $('#login-btn').disabled = true;
+    $('#login-btn').textContent = 'Входим…';
+    try {
+      await login(name, pin);
+    } catch (e) {
+      console.error(e);
+      $('#login-hint').textContent = e.message === 'cloud_read_failed' || e.message === 'cloud_write_failed'
+        ? 'Облако недоступно, проверь интернет и попробуй ещё раз.'
+        : e.message;
+    } finally {
+      $('#login-btn').disabled = false;
+      $('#login-btn').textContent = 'Начать учиться';
+    }
   });
-  $('#login-name').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') $('#login-btn').click();
-  });
+  $('#login-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#login-btn').click(); });
+  $('#login-pin').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#login-btn').click(); });
 
   $('#tabs').addEventListener('click', (e) => {
     const b = e.target.closest('button');

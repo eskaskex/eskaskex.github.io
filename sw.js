@@ -1,10 +1,11 @@
 // Service Worker — кэширует файлы приложения, чтобы оно открывалось мгновенно
 // и работало как настоящее приложение на Android.
-const CACHE = 'erudit-v3';
+const CACHE = 'erudit-v4';
 const ASSETS = [
   './',
   './index.html',
   './css/style.css',
+  './js/cloud-config.js',
   './js/app.js',
   './data/words.json',
   './manifest.webmanifest',
