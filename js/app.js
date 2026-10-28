@@ -9,11 +9,11 @@ const CLOUD = window.CLOUD || {};
 const cloudEnabled = !!(CLOUD.url && CLOUD.key);
 
 let profile = null;   // имя пользователя (сохраняется между визитами)
-let baseWords = [];   // из data/words.json
-let customWords = []; // свои слова текущего профиля
+let dictWords = [];   // словарь (из облака; офлайн — из кэша/файлов)
 let progress = {};    // id -> {box, correct, wrong, last_review}
 let session = null;
 let syncTimer = null;
+let wordCardId = null;
 
 // каталог
 let activeCategory = '';
@@ -48,7 +48,6 @@ async function sha256(s) {
     const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('erudit:' + s));
     return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
   } catch (e) {
-    // запасной вариант без crypto.subtle (например, file://)
     let h = 5381;
     for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
     return 'x' + h.toString(16);
@@ -66,6 +65,48 @@ function cloudHeaders(extra = {}) {
   };
 }
 
+/* ---- слова ---- */
+
+function wordPayload(w) {
+  return {
+    id: w.id,
+    word: w.word,
+    stress: typeof w.stress === 'number' ? w.stress : null,
+    category: w.category || '',
+    meaning: w.meaning,
+    etymology: w.etymology || '',
+    examples: Array.isArray(w.examples) ? w.examples : []
+  };
+}
+
+async function cloudGetWords() {
+  const r = await fetch(`${CLOUD.url}/rest/v1/words?select=*&order=word.asc`, {
+    headers: cloudHeaders()
+  });
+  if (!r.ok) throw new Error('cloud_words_failed');
+  const rows = await r.json();
+  return rows.map(normalizeWord);
+}
+
+async function cloudUpsertWord(w) {
+  const r = await fetch(`${CLOUD.url}/rest/v1/words`, {
+    method: 'POST',
+    headers: cloudHeaders({ Prefer: 'resolution=merge-duplicates' }),
+    body: JSON.stringify(wordPayload(w))
+  });
+  if (!r.ok) throw new Error('cloud_write_failed');
+}
+
+async function cloudDeleteWord(id) {
+  const r = await fetch(`${CLOUD.url}/rest/v1/words?id=eq.${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: cloudHeaders()
+  });
+  if (!r.ok) throw new Error('cloud_delete_failed');
+}
+
+/* ---- профили (прогресс) ---- */
+
 async function cloudGet(name) {
   const key = name.toLowerCase();
   const r = await fetch(`${CLOUD.url}/rest/v1/profiles?select=*&name=eq.${encodeURIComponent(key)}`, {
@@ -76,7 +117,7 @@ async function cloudGet(name) {
   return rows[0] || null;
 }
 
-async function cloudUpsert(row) {
+async function cloudUpsertProfile(row) {
   const r = await fetch(`${CLOUD.url}/rest/v1/profiles`, {
     method: 'POST',
     headers: cloudHeaders({ Prefer: 'resolution=merge-duplicates' }),
@@ -85,27 +126,23 @@ async function cloudUpsert(row) {
   if (!r.ok) throw new Error('cloud_write_failed');
 }
 
-async function cloudSaveData(name, data) {
+async function cloudSaveProgress(name, progress) {
   const key = name.toLowerCase();
   const r = await fetch(`${CLOUD.url}/rest/v1/profiles?name=eq.${encodeURIComponent(key)}`, {
     method: 'PATCH',
     headers: cloudHeaders(),
-    body: JSON.stringify({ data, updated_at: new Date().toISOString() })
+    body: JSON.stringify({ progress, updated_at: new Date().toISOString() })
   });
   if (!r.ok) throw new Error('cloud_write_failed');
 }
 
-function snapshot() {
-  return { display_name: profile, progress, customWords, updated_at: new Date().toISOString() };
-}
-
-/* Отложенная выгрузка прогресса в облако (чтобы не дёргать сеть на каждый ответ) */
+/* Отложенная выгрузка прогресса в облако */
 function queueSync() {
   if (!cloudEnabled || !profile) return;
   clearTimeout(syncTimer);
   syncTimer = setTimeout(async () => {
     try {
-      await cloudSaveData(profile, snapshot());
+      await cloudSaveProgress(profile, progress);
       $('#status').textContent = '☁ сохранено';
       setTimeout(() => renderStudy(), 1500);
     } catch (e) {
@@ -117,23 +154,21 @@ function queueSync() {
 }
 
 /* Слияние локального и облачного прогресса: побеждает более свежий ответ */
-function mergeData(localProgress, localCustom, cloudData) {
-  const merged = { ...(cloudData.progress || {}) };
+function mergeProgress(localProgress, cloudProgress) {
+  const merged = { ...(cloudProgress || {}) };
   for (const [id, lp] of Object.entries(localProgress || {})) {
     const cp = merged[id];
     if (!cp || !cp.last_review || new Date(lp.last_review || 0) > new Date(cp.last_review || 0)) {
       merged[id] = lp;
     }
   }
-  const cloudCustom = cloudData.customWords || [];
-  const have = new Set(cloudCustom.map((w) => w.id));
-  const union = [...cloudCustom, ...(localCustom || []).filter((w) => !have.has(w.id))];
-  return { progress: merged, customWords: union };
+  return merged;
 }
 
 /* ================== ПРОФИЛИ И СЕССИЯ ================== */
 
 function profileKey(suffix) { return 'erudit_' + suffix + ':' + profile.toLowerCase(); }
+function profileKeyOf(name, suffix) { return 'erudit_' + suffix + ':' + name.toLowerCase(); }
 
 function loadSession() {
   profile = localStorage.getItem('erudit_profile');
@@ -157,48 +192,39 @@ async function login(name, pin) {
     const row = await cloudGet(key);
 
     if (!row) {
-      // новый профиль — создаём, подтягивая локальный прогресс этого устройства, если был
-      const localProgress = load('erudit_progress_v1', {}) || load(profileKeyOf(key, 'progress_v2'), {});
-      const localCustom = load('erudit_custom_v1', []) || load(profileKeyOf(key, 'custom_v2'), []);
-      await cloudUpsert({
+      // новый профиль — подтягиваем локальный прогресс этого устройства, если был
+      const localProgress = load('erudit_progress_v1', null) || load(profileKeyOf(key, 'progress_v2'), {}) || {};
+      await cloudUpsertProfile({
         name: key,
         pin_hash: hash,
-        data: { display_name: name.trim(), progress: localProgress, customWords: localCustom, updated_at: new Date().toISOString() }
+        progress: localProgress,
+        updated_at: new Date().toISOString()
       });
     } else if (row.pin_hash !== hash) {
       throw new Error('Неверный ПИН для ника «' + name.trim() + '»');
     }
 
-    // подтягиваем облачные данные и сливаем с локальными
-    const data = row ? (row.data || {}) : {};
+    const cloudProgress = row ? (row.progress || {}) : {};
     const localProgress = load(profileKeyOf(key, 'progress_v2'), {});
-    const localCustom = load(profileKeyOf(key, 'custom_v2'), []);
-    const merged = mergeData(localProgress, localCustom, data);
+    const merged = mergeProgress(localProgress, cloudProgress);
 
     profile = name.trim().slice(0, 30);
     saveSession();
-    save(profileKey('progress_v2'), merged.progress);
-    save(profileKey('custom_v2'), merged.customWords);
-    await cloudSaveData(profile, snapshot()); // облако получает слияние
+    save(profileKey('progress_v2'), merged);
+    await cloudSaveProgress(profile, merged);
   } else {
     // локальный режим (без облака)
     profile = name.trim().slice(0, 30);
     saveSession();
-    // миграция прогресса до профилей
     if (!localStorage.getItem(profileKey('progress_v2'))) {
       const oldProgress = load('erudit_progress_v1', null);
       if (oldProgress) save(profileKey('progress_v2'), oldProgress);
-      const oldCustom = load('erudit_custom_v1', null);
-      if (oldCustom) save(profileKey('custom_v2'), oldCustom);
     }
   }
 
   loadState();
   enterApp();
 }
-
-/* ключи хранилища для произвольного имени (нужны до назначения profile) */
-function profileKeyOf(name, suffix) { return 'erudit_' + suffix + ':' + name.toLowerCase(); }
 
 function showLogin() {
   $('#login').hidden = false;
@@ -220,15 +246,71 @@ function enterApp() {
   renderAll();
 }
 
-/* ================== СЛОВА И ПРОГРЕСС ================== */
+/* ================== СЛОВАРЬ ================== */
+
+function normalizeWord(w) {
+  return {
+    id: w.id || ('w:' + String(w.word).toLowerCase()),
+    word: String(w.word),
+    stress: typeof w.stress === 'number' ? w.stress : null,
+    category: w.category || '',
+    meaning: w.meaning,
+    etymology: w.etymology || '',
+    examples: Array.isArray(w.examples) ? w.examples : (w.example ? [w.example] : [])
+  };
+}
+
+async function loadWords() {
+  // 1) облако — главный источник
+  if (cloudEnabled) {
+    try {
+      dictWords = await cloudGetWords();
+      save('erudit_words_cache', dictWords);
+      await migrateLegacyCustomWords();
+      return;
+    } catch (e) {
+      console.warn('Словарь из облака недоступен, беру локальную копию', e);
+    }
+  }
+  // 2) локальный кэш
+  const cached = load('erudit_words_cache', null);
+  if (cached && cached.length) { dictWords = cached; return; }
+  // 3) встроенные файлы (первый запуск офлайн)
+  try {
+    const a = await fetch('data/words.json').then((r) => r.json());
+    const b = await fetch('data/words-2.json').then((r) => r.json()).catch(() => []);
+    dictWords = [...a, ...b].map(normalizeWord);
+    save('erudit_words_cache', dictWords);
+  } catch (e) {
+    dictWords = [];
+  }
+}
+
+/* Свои слова из старых версий переносятся в общий словарь облака */
+async function migrateLegacyCustomWords() {
+  const have = new Set(dictWords.map((w) => w.id));
+  const sources = [load('erudit_custom_v1', []) || [], load(profileKey('custom_v2'), []) || []];
+  const missing = [];
+  sources.forEach((arr) => (arr || []).forEach((w) => {
+    if (w && w.word && w.meaning && !have.has(w.id)) { missing.push(w); have.add(w.id); }
+  }));
+  for (const w of missing) {
+    try { await cloudUpsertWord(w); } catch (e) { console.warn('Не перенеслось:', w.word, e); }
+  }
+  if (missing.length) {
+    dictWords = dictWords.concat(missing.map(normalizeWord)).sort((x, y) => x.word.localeCompare(y.word, 'ru'));
+    save('erudit_words_cache', dictWords);
+  }
+}
 
 function allWords() {
-  return [...baseWords, ...customWords];
+  return dictWords;
 }
+
+/* ================== ПРОГРЕСС ================== */
 
 function loadState() {
   progress = load(profileKey('progress_v2'), {});
-  customWords = (load(profileKey('custom_v2'), []) || []).filter((w) => w && w.word && w.meaning);
 }
 
 function prog(id) {
@@ -278,6 +360,7 @@ function stressed(w) {
 
 function renderAll() {
   renderStudy();
+  renderChips();
   renderWords();
   renderStats();
 }
@@ -287,7 +370,7 @@ function renderStudy() {
   const total = allWords().length;
   $('#status').textContent = total ? `✓ ${total} слов` : '…';
   $('#due-info').innerHTML = total === 0
-    ? 'В словаре пока нет слов.'
+    ? 'Словарь пуст. Добавь слова во вкладке «Слова».'
     : `В словаре: <b>${total}</b> слов<br>Пора повторить: <b>${due}</b>`;
 }
 
@@ -314,7 +397,6 @@ function renderWords() {
 
   $('#word-list').innerHTML = list.map((w) => {
     const p = prog(w.id);
-    const custom = customWords.some((c) => c.id === w.id);
     return `
     <div class="wordrow" data-id="${esc(w.id)}">
       <div class="w-main">
@@ -324,15 +406,15 @@ function renderWords() {
       </div>
       <div class="w-meta">📦 ${p.box || 1}<br>✓${p.correct || 0} ✗${p.wrong || 0}</div>
       <div class="w-actions">
-        ${custom ? `<button class="icon-mini" data-act="edit" title="Редактировать">✎</button>` : ''}
-        ${custom ? `<button class="icon-mini" data-act="del" title="Удалить">🗑</button>` : ''}
+        <button class="icon-mini" data-act="edit" title="Редактировать">✎</button>
+        <button class="icon-mini" data-act="del" title="Удалить">🗑</button>
       </div>
     </div>`;
   }).join('') || '<p class="empty">Ничего не найдено</p>';
 }
 
 function renderChips() {
-  const cats = [...new Set(allWords().map((w) => w.category).filter(Boolean))];
+  const cats = [...new Set(allWords().map((w) => w.category).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ru'));
   const counts = {};
   allWords().forEach((w) => { if (w.category) counts[w.category] = (counts[w.category] || 0) + 1; });
   $('#cat-chips').innerHTML = `
@@ -350,8 +432,8 @@ function nextRepeatText(p) {
 function openWordCard(id) {
   const w = allWords().find((x) => x.id === id);
   if (!w) return;
+  wordCardId = id;
   const p = prog(w.id);
-  const custom = customWords.some((c) => c.id === w.id);
   $('#word-full').innerHTML = `
     <div class="wf-word">${stressed(w)}</div>
     ${w.category ? `<div class="wf-cat">📁 ${esc(w.category)}</div>` : ''}
@@ -364,7 +446,10 @@ function openWordCard(id) {
       <span>✗ ${p.wrong || 0}</span>
       <span>🔁 ${nextRepeatText(p)}</span>
     </div>
-    ${custom ? `<div class="wf-actions"><button class="ghost" data-act="edit">✎ Редактировать</button><button class="ghost danger-outline" data-act="del">🗑 Удалить</button></div>` : ''}
+    <div class="wf-actions">
+      <button class="ghost" data-act="edit">✎ Редактировать</button>
+      <button class="ghost danger-outline" data-act="del">🗑 Удалить</button>
+    </div>
     <button id="wf-close" class="primary">Закрыть</button>
   `;
   $('#word-modal').hidden = false;
@@ -523,68 +608,98 @@ function exitSession() {
   renderStudy();
 }
 
-/* ================== СВОИ СЛОВА ================== */
+/* ================== СЛОВА: ДОБАВЛЕНИЕ / ПРАВКА / УДАЛЕНИЕ ================== */
 
-function onAddWord(e) {
+async function onAddWord(e) {
   e.preventDefault();
   const word = $('#f-word').value.trim();
   const meaning = $('#f-tr').value.trim();
   if (!word || !meaning) return;
-  customWords.push({
+
+  const dup = dictWords.find((w) => w.word.toLowerCase() === word.toLowerCase());
+  if (dup && !confirm('Слово «' + dup.word + '» уже есть в словаре. Добавить всё равно?')) return;
+
+  const newWord = normalizeWord({
     id: 'c' + Date.now(),
     word,
     meaning,
     category: $('#f-cat').value.trim(),
     examples: [$('#f-ex').value.trim()].filter(Boolean)
   });
-  save(profileKey('custom_v2'), customWords);
+
+  $('#add-form button[type="submit"]').disabled = true;
+  let savedToCloud = false;
+  if (cloudEnabled) {
+    try { await cloudUpsertWord(newWord); savedToCloud = true; }
+    catch (err) { console.warn('Слово не сохранилось в облако', err); }
+  }
+  // слово сразу видно на этом устройстве и попадает в кэш
+  if (!dictWords.some((w) => w.id === newWord.id)) {
+    dictWords.push(newWord);
+    dictWords.sort((a, b) => a.word.localeCompare(b.word, 'ru'));
+    save('erudit_words_cache', dictWords);
+  }
   $('#f-word').value = ''; $('#f-tr').value = ''; $('#f-cat').value = ''; $('#f-ex').value = '';
+  $('#add-form button[type="submit"]').disabled = false;
   renderAll();
-  queueSync();
+  if (cloudEnabled && !savedToCloud) alert('Слово сохранено на устройстве, но облако недоступно — попробуй синхронизировать позже.');
 }
 
-function onWordListClick(e) {
+async function onWordListClick(e) {
   const row = e.target.closest('.wordrow, .gcard');
   if (!row) return;
   const id = row.dataset.id;
-
-  // кнопки правки/удаления — только для своих слов
   const actBtn = e.target.closest('button[data-act]');
-  if (actBtn) {
-    const idx = customWords.findIndex((x) => x.id === id);
-    if (idx < 0) return;
-    const w = customWords[idx];
 
-    if (actBtn.dataset.act === 'del') {
-      if (!confirm(`Удалить «${w.word}»?`)) return;
-      customWords.splice(idx, 1);
-      delete progress[id];
-      save(profileKey('custom_v2'), customWords);
-      saveProgress();
-      renderAll();
-    }
-
-    if (actBtn.dataset.act === 'edit') {
-      const nw = prompt('Слово:', w.word);
-      if (nw === null) return;
-      const nm = prompt('Значение:', w.meaning);
-      if (nm === null) return;
-      customWords[idx] = { ...w, word: nw.trim() || w.word, meaning: nm.trim() || w.meaning };
-      save(profileKey('custom_v2'), customWords);
-      renderAll();
-      queueSync();
-    }
+  if (actBtn && actBtn.dataset.act === 'edit') {
+    await editWord(id);
     return;
   }
 
-  // обычный клик по слову — полная карточка
+  if (actBtn && actBtn.dataset.act === 'del') {
+    await deleteWord(id);
+    return;
+  }
+
   openWordCard(id);
+}
+
+async function editWord(id) {
+  const w = dictWords.find((x) => x.id === id);
+  if (!w) return;
+  const nw = prompt('Слово:', w.word);
+  if (nw === null) return;
+  const nm = prompt('Значение:', w.meaning);
+  if (nm === null) return;
+  const nc = prompt('Категория:', w.category || '') ?? w.category;
+  w.word = nw.trim() || w.word;
+  w.meaning = nm.trim() || w.meaning;
+  w.category = String(nc).trim();
+  if (cloudEnabled) {
+    try { await cloudUpsertWord(w); } catch (err) { alert('Не сохранилось в облако: ' + err.message); }
+  }
+  save('erudit_words_cache', dictWords);
+  renderAll();
+}
+
+async function deleteWord(id) {
+  const w = dictWords.find((x) => x.id === id);
+  if (!w) return;
+  if (!confirm(`Удалить «${w.word}» из словаря? Прогресс по нему тоже удалится.`)) return;
+  dictWords = dictWords.filter((x) => x.id !== id);
+  delete progress[id];
+  save('erudit_words_cache', dictWords);
+  saveProgress();
+  if (cloudEnabled) {
+    try { await cloudDeleteWord(id); } catch (err) { alert('Не удалилось из облака: ' + err.message); }
+  }
+  renderAll();
 }
 
 /* ================== ЭКСПОРТ / ИМПОРТ / СБРОС ================== */
 
 function exportData() {
-  const data = JSON.stringify({ app: 'erudit', version: 2, profile, progress, customWords }, null, 2);
+  const data = JSON.stringify({ app: 'erudit', version: 3, profile, progress, words: dictWords }, null, 2);
   const blob = new Blob([data], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -595,20 +710,28 @@ function exportData() {
 
 function importData(file) {
   const reader = new FileReader();
-  reader.onload = () => {
+  reader.onload = async () => {
     try {
       const data = JSON.parse(reader.result);
-      if (data.progress) { progress = { ...progress, ...data.progress }; saveProgress(); }
-      if (Array.isArray(data.customWords)) {
-        const have = new Set(customWords.map((w) => w.id));
-        data.customWords.forEach((w) => {
-          if (w && w.id && w.word && w.meaning && !have.has(w.id)) customWords.push(w);
-        });
-        save(profileKey('custom_v2'), customWords);
+      let restored = 0;
+      if (data.progress) {
+        progress = mergeProgress(data.progress, progress);
+        saveProgress();
+        restored++;
+      }
+      if (Array.isArray(data.words) && cloudEnabled) {
+        for (const w of data.words) {
+          if (!w || !w.word || !w.meaning) continue;
+          const exists = dictWords.some((x) => x.id === (w.id || 'w:' + w.word.toLowerCase()));
+          if (!exists) {
+            try { await cloudUpsertWord(normalizeWord(w)); dictWords.push(normalizeWord(w)); restored++; } catch (err) {}
+          }
+        }
+        dictWords.sort((a, b) => a.word.localeCompare(b.word, 'ru'));
+        save('erudit_words_cache', dictWords);
       }
       renderAll();
-      queueSync();
-      alert('Данные загружены ✓');
+      alert('Данные загружены ✓' + (restored ? ' (обновлено записей: ' + restored + ')' : ''));
     } catch (e) {
       alert('Не удалось прочитать файл: ' + e.message);
     }
@@ -629,7 +752,7 @@ function openModal(msg) {
   $('#modal').hidden = false;
   $('#modal-msg').textContent = msg ||
     (cloudEnabled
-      ? `Ты вошёл как «${profile}». Прогресс синхронизируется с облаком по нику и ПИН-коду — на другом устройстве войди тем же ником и ПИНом.`
+      ? `Ты вошёл как «${profile}». Прогресс и словарь синхронизируются с облаком — на другом устройстве войди тем же ником и ПИНом.`
       : `Ты вошёл как «${profile}». Прогресс хранится в этом браузере. Сделай резервную копию, чтобы не потерять его.`);
 }
 
@@ -707,7 +830,15 @@ function bindUI() {
   });
 
   // полная карточка слова
-  $('#word-modal').addEventListener('click', (e) => {
+  $('#word-modal').addEventListener('click', async (e) => {
+    const actBtn = e.target.closest('.wf-actions button[data-act]');
+    if (actBtn && wordCardId) {
+      const act = actBtn.dataset.act;
+      closeWordCard();
+      if (act === 'edit') await editWord(wordCardId);
+      if (act === 'del') await deleteWord(wordCardId);
+      return;
+    }
     if (e.target === e.currentTarget || e.target.id === 'wf-close') closeWordCard();
   });
 
@@ -729,17 +860,7 @@ function bindUI() {
 
 async function init() {
   bindUI();
-  try {
-    const res = await fetch('data/words.json');
-    baseWords = await res.json();
-  } catch (e) {
-    baseWords = [];
-    console.error('Не удалось загрузить базу слов', e);
-  }
-  const seen = new Set();
-  baseWords = baseWords
-    .filter((w) => w && w.word && w.meaning && !seen.has(w.word.toLowerCase()) && seen.add(w.word.toLowerCase()))
-    .map((w) => ({ ...w, id: 'w:' + w.word.toLowerCase() }));
+  await loadWords();
 
   loadSession();
   if (profile) {
