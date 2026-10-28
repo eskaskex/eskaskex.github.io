@@ -4,8 +4,12 @@
 
 const INTERVALS = [0, 1, 3, 7, 14]; // дней между повторениями для коробок 1..5
 const SESSION_SIZE = 10;
+const LS_PROGRESS = 'erudit_progress_v1';
+const LS_CUSTOM = 'erudit_custom_v1';
 
-let words = [];
+let baseWords = [];   // из data/words.json
+let customWords = []; // свои слова (localStorage)
+let progress = {};    // id -> {box, correct, wrong, last_review}
 let session = null;
 
 const $ = (s) => document.querySelector(s);
@@ -26,60 +30,28 @@ function shuffle(arr) {
   return a;
 }
 
-/* ================== API ================== */
+function load(key, fallback) {
+  try { return JSON.parse(localStorage.getItem(key)) ?? fallback; }
+  catch (e) { return fallback; }
+}
+function save(key, val) { localStorage.setItem(key, JSON.stringify(val)); }
 
-function apiUrl() {
-  return (localStorage.getItem('erudit_api_url') || (window.CONFIG && window.CONFIG.API_URL) || '').trim();
+/* ================== СЛОВА И ПРОГРЕСС ================== */
+
+function allWords() {
+  return [...baseWords, ...customWords];
 }
 
-function setApiUrl(u) {
-  localStorage.setItem('erudit_api_url', u.trim());
+function loadState() {
+  progress = load(LS_PROGRESS, {});
+  customWords = (load(LS_CUSTOM, []) || []).filter((w) => w && w.word && w.meaning);
 }
 
-async function api(action, payload = {}) {
-  const url = apiUrl();
-  if (!url) throw new Error('Не указан адрес API (⚙ Настройки)');
-  const res = await fetch(url, {
-    method: 'POST',
-    // text/plain без кастомных заголовков — чтобы Apps Script пропустил запрос без preflight
-    body: JSON.stringify({ action, ...payload })
-  });
-  const text = await res.text();
-  let data;
-  try { data = JSON.parse(text); }
-  catch (e) { throw new Error('Некорректный ответ сервера: ' + text.slice(0, 100)); }
-  if (!data.ok) throw new Error(data.error || 'Ошибка API');
-  return data;
+function prog(id) {
+  return progress[id] || { box: 1, correct: 0, wrong: 0, last_review: null };
 }
 
-function setStatus(t, ok) {
-  const el = $('#status');
-  el.textContent = t;
-  el.style.opacity = ok === undefined ? '' : ok ? '1' : '.55';
-}
-
-/* ================== ЗАГРУЗКА ДАННЫХ ================== */
-
-async function connect() {
-  setStatus('Подключение…');
-  try {
-    await api('ping');
-    setStatus('✓ онлайн', true);
-    await reload();
-  } catch (err) {
-    console.error(err);
-    setStatus('✗ нет связи', false);
-    openSettings('Не удалось подключиться к базе: ' + err.message);
-  }
-}
-
-async function reload() {
-  const data = await api('getWords');
-  words = data.words || [];
-  renderAll();
-}
-
-/* ================== УМНОЕ ПОВТОРЕНИЕ ================== */
+function saveProgress() { save(LS_PROGRESS, progress); }
 
 function daysSince(v) {
   if (!v) return Infinity;
@@ -89,11 +61,21 @@ function daysSince(v) {
 }
 
 function isDue(w) {
-  return daysSince(w.last_review) >= INTERVALS[Math.min(4, (w.box || 1) - 1)];
+  const p = prog(w.id);
+  return daysSince(p.last_review) >= INTERVALS[Math.min(4, (p.box || 1) - 1)];
 }
 
 function dueWords() {
-  return words.filter(isDue);
+  return allWords().filter(isDue);
+}
+
+function answer(id, correct) {
+  const p = prog(id);
+  if (correct) { p.correct++; p.box = Math.min(5, p.box + 1); }
+  else { p.wrong++; p.box = 1; }
+  p.last_review = new Date().toISOString();
+  progress[id] = p;
+  saveProgress();
 }
 
 /* ================== РЕНДЕР ================== */
@@ -106,42 +88,47 @@ function renderAll() {
 
 function renderStudy() {
   const due = dueWords().length;
-  const total = words.length;
+  const total = allWords().length;
+  $('#status').textContent = total ? `✓ ${total} слов` : '…';
   $('#due-info').innerHTML = total === 0
-    ? 'В словаре пока нет слов. Перейди во вкладку <b>«Слова»</b> и добавь первое.'
-    : `Всего слов: <b>${total}</b><br>Пора повторить: <b>${due}</b>`;
+    ? 'В словаре пока нет слов.'
+    : `В словаре: <b>${total}</b> слов<br>Пора повторить: <b>${due}</b>`;
 }
 
 function renderWords() {
   const q = $('#search').value.trim().toLowerCase();
-  const list = words.filter((w) =>
-    !q || (w.word + ' ' + w.translation + ' ' + (w.category || '')).toLowerCase().includes(q)
+  const list = allWords().filter((w) =>
+    !q || (w.word + ' ' + w.meaning + ' ' + (w.category || '')).toLowerCase().includes(q)
   );
-  $('#word-list').innerHTML = list.map((w) => `
+  $('#word-list').innerHTML = list.map((w) => {
+    const p = prog(w.id);
+    const custom = customWords.some((c) => c.id === w.id);
+    return `
     <div class="wordrow" data-id="${esc(w.id)}">
       <div class="w-main">
         <b>${esc(w.word)}</b>
-        <span>${esc(w.translation)}</span>
-        ${w.category ? `<em>📁 ${esc(w.category)}</em>` : ''}
+        <span>${esc(w.meaning)}</span>
+        ${w.example ? `<em>${esc(w.example)}</em>` : ''}
       </div>
-      <div class="w-meta">📦 ${w.box || 1}<br>✓${w.correct || 0} ✗${w.wrong || 0}</div>
+      <div class="w-meta">📦 ${p.box || 1}<br>✓${p.correct || 0} ✗${p.wrong || 0}</div>
       <div class="w-actions">
-        <button class="icon-mini" data-act="edit" title="Редактировать">✎</button>
-        <button class="icon-mini" data-act="del" title="Удалить">🗑</button>
+        ${custom ? `<button class="icon-mini" data-act="edit" title="Редактировать">✎</button>` : ''}
+        ${custom ? `<button class="icon-mini" data-act="del" title="Удалить">🗑</button>` : ''}
       </div>
-    </div>
-  `).join('') || '<p class="empty">Ничего не найдено</p>';
+    </div>`;
+  }).join('') || '<p class="empty">Ничего не найдено</p>';
 }
 
 function renderStats() {
-  const total = words.length;
-  const learned = words.filter((w) => (w.box || 1) >= 4).length;
+  const all = allWords();
+  const total = all.length;
+  const learned = all.filter((w) => (prog(w.id).box || 1) >= 4).length;
   const due = dueWords().length;
   $('#stat-total').textContent = total;
   $('#stat-learned').textContent = learned;
   $('#stat-due').textContent = due;
 
-  const counts = [1, 2, 3, 4, 5].map((b) => words.filter((w) => (w.box || 1) === b).length);
+  const counts = [1, 2, 3, 4, 5].map((b) => all.filter((w) => (prog(w.id).box || 1) === b).length);
   const max = Math.max(1, ...counts);
   $('#boxes').innerHTML = counts.map((c, i) => `
     <div class="boxcol">
@@ -151,11 +138,12 @@ function renderStats() {
     </div>
   `).join('');
 
-  const worst = [...words].sort((a, b) => (b.wrong || 0) - (a.wrong || 0)).filter((w) => (w.wrong || 0) > 0).slice(0, 5);
+  const worst = [...all].sort((a, b) => (prog(b.id).wrong || 0) - (prog(a.id).wrong || 0))
+    .filter((w) => (prog(w.id).wrong || 0) > 0).slice(0, 5);
   $('#worst').innerHTML = worst.map((w) => `
     <div class="wordrow">
-      <div class="w-main"><b>${esc(w.word)}</b><span>${esc(w.translation)}</span></div>
-      <div class="w-meta">ошибок: ${w.wrong || 0}</div>
+      <div class="w-main"><b>${esc(w.word)}</b><span>${esc(w.meaning)}</span></div>
+      <div class="w-meta">ошибок: ${prog(w.id).wrong}</div>
     </div>
   `).join('') || '<p class="muted">Пока нет данных — начни учиться!</p>';
 }
@@ -177,12 +165,10 @@ function startSession() {
   let list = shuffle(dueWords()).slice(0, SESSION_SIZE);
 
   if (list.length === 0) {
-    if (words.length === 0) {
-      alert('Сначала добавь слова во вкладке «Слова».');
-      return;
-    }
+    const all = allWords();
+    if (all.length === 0) return;
     if (!confirm('На сегодня всё повторено. Пройти слова всё равно?')) return;
-    list = shuffle([...words]).slice(0, SESSION_SIZE);
+    list = shuffle(all).slice(0, SESSION_SIZE);
   }
 
   session = { mode, list: [...list], i: 0, right: 0, flipped: false };
@@ -204,14 +190,14 @@ function nextItem() {
   if (session.mode === 'cards') {
     $('#card').innerHTML = `
       <div class="word">${esc(w.word)}</div>
-      ${w.example ? `<div class="example">${esc(w.example)}</div>` : ''}
       <div class="hint">нажми на карточку, чтобы проверить себя</div>`;
   } else {
     $('#card').innerHTML = `
       <div class="word">${esc(w.word)}</div>
-      <div class="hint">выбери правильный перевод</div>`;
-    const others = shuffle(words.filter((x) => x.id !== w.id)).slice(0, 3);
-    const opts = shuffle([w, ...others]).map((x) => x.translation);
+      <div class="hint">выбери правильное значение</div>`;
+    const seen = new Set([w.meaning]);
+    const others = shuffle(allWords().filter((x) => !seen.has(x.meaning) && seen.add(x.meaning))).slice(0, 3);
+    const opts = shuffle([w, ...others]).map((x) => x.meaning);
     $('#answers').innerHTML = opts.map((o) => `<button class="opt">${esc(o)}</button>`).join('');
     $$('#answers .opt').forEach((btn) => {
       btn.addEventListener('click', () => onQuizAnswer(btn, w));
@@ -225,40 +211,30 @@ function flipCard() {
   const w = session.list[session.i];
   $('#card').classList.add('flipped');
   $('#card').innerHTML = `
-    <div class="translation">${esc(w.translation)}</div>
-    <div class="example">${esc(w.word)}${w.example ? ' — ' + esc(w.example) : ''}</div>
-    <div class="hint">ты помнил перевод?</div>`;
+    <div class="translation">${esc(w.meaning)}</div>
+    ${w.example ? `<div class="example">${esc(w.example)}</div>` : ''}
+    <div class="hint">ты помнил значение?</div>`;
   $('#btn-no').hidden = false;
   $('#btn-know').hidden = false;
 }
 
 function onQuizAnswer(btn, w) {
   if (!session) return;
-  const ok = btn.textContent.trim().toLowerCase() === String(w.translation).trim().toLowerCase();
+  const ok = btn.textContent.trim().toLowerCase() === String(w.meaning).trim().toLowerCase();
   $$('#answers .opt').forEach((b) => {
     b.disabled = true;
-    if (b.textContent.trim().toLowerCase() === String(w.translation).trim().toLowerCase()) {
+    if (b.textContent.trim().toLowerCase() === String(w.meaning).trim().toLowerCase()) {
       b.classList.add('right');
     }
   });
   if (!ok) btn.classList.add('wrong');
-  answer(w, ok);
-}
-
-async function answer(w, correct) {
-  if (correct) session.right++;
-  // Не ждём сеть дольше 3 секунд — занятие не должно виснуть
-  try {
-    await Promise.race([
-      api('answer', { id: w.id, correct }),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 3000))
-    ]);
-  } catch (e) {
-    console.error('Не сохранился ответ:', e);
-  }
+  setTimeout(() => answer(w.id, ok), ok ? 600 : 1200);
   session.i++;
-  if (session.i >= session.list.length) finishSession();
-  else nextItem();
+  setTimeout(() => {
+    if (!session) return;
+    if (session.i >= session.list.length) finishSession();
+    else nextItem();
+  }, ok ? 600 : 1400);
 }
 
 function finishSession() {
@@ -266,7 +242,7 @@ function finishSession() {
   $('#study-idle').hidden = false;
   $('#result').textContent = `🎉 Готово! Правильных ответов: ${session.right} из ${session.list.length}`;
   session = null;
-  reload().catch(console.error);
+  renderAll();
 }
 
 function exitSession() {
@@ -277,94 +253,101 @@ function exitSession() {
   renderStudy();
 }
 
-/* ================== СЛОВА ================== */
+/* ================== СВОИ СЛОВА ================== */
 
 async function onAddWord(e) {
   e.preventDefault();
   const word = $('#f-word').value.trim();
-  const translation = $('#f-tr').value.trim();
-  if (!word || !translation) return;
-  $('#add-form button[type="submit"]').disabled = true;
-  try {
-    await api('addWord', {
-      word,
-      translation,
-      category: $('#f-cat').value.trim(),
-      example: $('#f-ex').value.trim()
-    });
-    $('#f-word').value = ''; $('#f-tr').value = ''; $('#f-cat').value = ''; $('#f-ex').value = '';
-    await reload();
-  } catch (err) {
-    alert('Не удалось добавить слово: ' + err.message);
-  } finally {
-    $('#add-form button[type="submit"]').disabled = false;
-  }
+  const meaning = $('#f-tr').value.trim();
+  if (!word || !meaning) return;
+  customWords.push({
+    id: 'c' + Date.now(),
+    word,
+    meaning,
+    category: $('#f-cat').value.trim(),
+    example: $('#f-ex').value.trim()
+  });
+  save(LS_CUSTOM, customWords);
+  $('#f-word').value = ''; $('#f-tr').value = ''; $('#f-cat').value = ''; $('#f-ex').value = '';
+  renderAll();
 }
 
-async function onWordListClick(e) {
+function onWordListClick(e) {
   const btn = e.target.closest('button[data-act]');
   if (!btn) return;
   const row = btn.closest('.wordrow');
   const id = row.dataset.id;
-  const w = words.find((x) => x.id === id);
-  if (!w) return;
+  const idx = customWords.findIndex((x) => x.id === id);
+  if (idx < 0) return;
+  const w = customWords[idx];
 
   if (btn.dataset.act === 'del') {
     if (!confirm(`Удалить «${w.word}»?`)) return;
-    try {
-      await api('deleteWord', { id });
-      await reload();
-    } catch (err) {
-      alert('Не удалось удалить: ' + err.message);
-    }
+    customWords.splice(idx, 1);
+    delete progress[id];
+    save(LS_CUSTOM, customWords);
+    saveProgress();
+    renderAll();
   }
 
   if (btn.dataset.act === 'edit') {
     const nw = prompt('Слово:', w.word);
     if (nw === null) return;
-    const ntr = prompt('Перевод:', w.translation);
-    if (ntr === null) return;
-    const ncat = prompt('Категория:', w.category || '') ?? w.category;
-    const nex = prompt('Пример:', w.example || '') ?? w.example;
+    const nm = prompt('Значение:', w.meaning);
+    if (nm === null) return;
+    customWords[idx] = { ...w, word: nw.trim() || w.word, meaning: nm.trim() || w.meaning };
+    save(LS_CUSTOM, customWords);
+    renderAll();
+  }
+}
+
+/* ================== ЭКСПОРТ / ИМПОРТ / СБРОС ================== */
+
+function exportData() {
+  const data = JSON.stringify({ app: 'erudit', version: 1, progress, customWords }, null, 2);
+  const blob = new Blob([data], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'erudit-backup.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function importData(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
     try {
-      await api('updateWord', { id, word: nw, translation: ntr, category: ncat, example: nex });
-      await reload();
-    } catch (err) {
-      alert('Не удалось сохранить: ' + err.message);
+      const data = JSON.parse(reader.result);
+      if (data.progress) { progress = { ...progress, ...data.progress }; saveProgress(); }
+      if (Array.isArray(data.customWords)) {
+        const have = new Set(customWords.map((w) => w.id));
+        data.customWords.forEach((w) => { if (w && w.id && w.word && w.meaning && !have.has(w.id)) customWords.push(w); });
+        save(LS_CUSTOM, customWords);
+      }
+      renderAll();
+      alert('Данные загружены ✓');
+    } catch (e) {
+      alert('Не удалось прочитать файл: ' + e.message);
     }
-  }
+  };
+  reader.readAsText(file);
 }
 
-async function onResetProgress() {
+function onResetProgress() {
   if (!confirm('Точно сбросить прогресс всех слов? Сами слова останутся.')) return;
-  try {
-    await api('resetProgress');
-    await reload();
-  } catch (err) {
-    alert('Ошибка: ' + err.message);
-  }
+  progress = {};
+  saveProgress();
+  renderAll();
 }
 
-/* ================== НАСТРОЙКИ ================== */
+/* ================== МОДАЛКА ================== */
 
-function openSettings(msg) {
+function openModal(msg) {
   $('#modal').hidden = false;
-  $('#api-input').value = apiUrl();
-  if (msg) $('#modal h2').textContent = '⚙ ' + msg;
-  else $('#modal h2').textContent = '⚙ Настройки';
+  $('#modal-msg').textContent = msg || 'Прогресс хранится в этом браузере. Сделай резервную копию, чтобы не потерять его при очистке данных.';
 }
 
-function closeSettings() {
-  $('#modal').hidden = true;
-}
-
-async function saveSettings() {
-  const u = $('#api-input').value.trim();
-  if (!u) { closeSettings(); return; }
-  setApiUrl(u);
-  closeSettings();
-  await connect();
-}
+function closeModal() { $('#modal').hidden = true; }
 
 /* ================== СТАРТ ================== */
 
@@ -377,18 +360,31 @@ function bindUI() {
   $('#btn-start').addEventListener('click', startSession);
   $('#btn-exit').addEventListener('click', exitSession);
   $('#card').addEventListener('click', flipCard);
-  $('#btn-know').addEventListener('click', () => session && answer(session.list[session.i].w, true));
-  $('#btn-no').addEventListener('click', () => session && answer(session.list[session.i].w, false));
+  $('#btn-know').addEventListener('click', () => {
+    if (!session) return;
+    answer(session.list[session.i].id, true);
+    session.i++;
+    if (session.i >= session.list.length) finishSession(); else nextItem();
+  });
+  $('#btn-no').addEventListener('click', () => {
+    if (!session) return;
+    answer(session.list[session.i].id, false);
+    session.i++;
+    if (session.i >= session.list.length) finishSession(); else nextItem();
+  });
 
   $('#add-form').addEventListener('submit', onAddWord);
   $('#search').addEventListener('input', renderWords);
   $('#word-list').addEventListener('click', onWordListClick);
   $('#btn-reset').addEventListener('click', onResetProgress);
 
-  $('#btn-settings').addEventListener('click', () => openSettings());
-  $('#api-save').addEventListener('click', saveSettings);
-  $('#api-cancel').addEventListener('click', () => {
-    if (apiUrl()) closeSettings();
+  $('#btn-settings').addEventListener('click', () => openModal());
+  $('#modal-close').addEventListener('click', closeModal);
+  $('#btn-export').addEventListener('click', exportData);
+  $('#btn-import').addEventListener('click', () => $('#file-import').click());
+  $('#file-import').addEventListener('change', (e) => {
+    if (e.target.files[0]) importData(e.target.files[0]);
+    e.target.value = '';
   });
 
   if ('serviceWorker' in navigator) {
@@ -398,12 +394,18 @@ function bindUI() {
 
 async function init() {
   bindUI();
-  if (!apiUrl()) {
-    renderStudy();
-    openSettings('Сначала подключим базу данных');
-    return;
+  try {
+    baseWords = await fetch('data/words.json').then((r) => r.json());
+  } catch (e) {
+    baseWords = [];
+    console.error('Не удалось загрузить базу слов', e);
   }
-  await connect();
+  // дедупликация по слову
+  const seen = new Set();
+  baseWords = baseWords.filter((w) => w && w.word && w.meaning && !seen.has(w.word.toLowerCase()) && seen.add(w.word.toLowerCase()));
+  baseWords = baseWords.map((w) => ({ ...w, id: 'w:' + w.word.toLowerCase() }));
+  loadState();
+  renderAll();
 }
 
 init();
