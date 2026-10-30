@@ -756,15 +756,20 @@ function flipCard() {
 }
 
 /** Общий обработчик выбора из вариантов (тесты «слово→значение» и «значение→слово»). */
+function normAnswer(s) {
+  return String(s).toLowerCase().replace(/ё/g, 'е').replace(/[\s\u0301-]+/g, '');
+}
+
 function onChoiceAnswer(btn, correctText, w) {
   if (!session || session.locked) return;
-  session.locked = true;
-  const ok = btn.textContent.trim() === String(correctText).trim();
+  const ok = normAnswer(btn.textContent) === normAnswer(correctText);
   $$('#answers .opt').forEach((b) => {
     b.disabled = true;
-    if (b.textContent.trim() === String(correctText).trim()) b.classList.add('right');
+    // правильный вариант подсвечиваем сразу и всегда
+    if (normAnswer(b.textContent) === normAnswer(correctText)) b.classList.add('right');
   });
   if (!ok) btn.classList.add('wrong');
+  // блокировку ставит сам submitAnswer — здесь её не трогаем (иначе переход «залипает»)
   submitAnswer(ok, ok ? 700 : 1600);
 }
 
