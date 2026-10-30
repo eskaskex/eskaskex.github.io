@@ -1036,6 +1036,7 @@ function bindUI() {
   $('#btn-next').addEventListener('click', () => {
     if (!session || !session.locked) return;
     const ok = !!session.pendingOk;
+    session.locked = false; // снимаем блокировку ответа, иначе submitAnswer отклонит переход
     hideNextBtn();
     submitAnswer(ok, 0);
   });
