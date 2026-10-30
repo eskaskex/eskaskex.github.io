@@ -655,9 +655,12 @@ function submitAnswer(ok, delayMs) {
 
 /** Варианты-слова для теста «определение → слово»: сначала той же категории. */
 function wordOptions(w) {
-  const same = allWords().filter((x) => x.id !== w.id && x.category && x.category === w.category);
-  const others = allWords().filter((x) => x.id !== w.id && x.category !== w.category);
-  return shuffle([...shuffle(same).slice(0, 3), ...shuffle(others)]).slice(0, 3);
+  const same = shuffle(allWords().filter((x) => x.id !== w.id && x.category && x.category === w.category)).slice(0, 3);
+  const need = 3 - same.length;
+  const others = need > 0
+    ? shuffle(allWords().filter((x) => x.id !== w.id && x.category !== w.category)).slice(0, need)
+    : [];
+  return [...same, ...others];
 }
 
 function normalizeAnswer(s) {
