@@ -455,6 +455,21 @@ button { font-family: inherit; }
 .type-ok { margin-top: 10px; color: var(--success); font-weight: 600; }
 .type-bad { margin-top: 10px; color: var(--danger); font-weight: 600; }
 
+/* ===== Кнопка «Следующее слово» и раскрытие вариантов ===== */
+.answer-next { margin-top: 10px; }
+.answers .opt { display: block; }
+.opt-detail {
+  display: block;
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px dashed var(--border);
+  font-size: 13px;
+  color: var(--muted);
+  text-align: left;
+  font-weight: 400;
+}
+.opt-detail em { font-style: normal; opacity: .8; }
+
 /* ===== Карточка после переворота: слово остаётся ===== */
 .card .word.word-answer { font-size: 21px; color: var(--muted); font-weight: 600; }
 .card .translation { font-size: 24px; }

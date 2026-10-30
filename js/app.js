@@ -673,6 +673,7 @@ function nextItem() {
   $('#btn-no').hidden = true;
   $('#btn-know').hidden = true;
   $('#answers').innerHTML = '';
+  hideNextBtn();
   $('#card').classList.remove('flipped');
   session.flipped = false;
   session.locked = false;
@@ -692,24 +693,28 @@ function nextItem() {
       <div class="hint">выбери правильное значение</div>`;
     const seen = new Set([w.meaning]);
     const others = shuffle(allWords().filter((x) => !seen.has(x.meaning) && seen.add(x.meaning))).slice(0, 3);
-    const opts = shuffle([w, ...others]).map((x) => x.meaning);
-    $('#answers').innerHTML = opts.map((o) => `<button class="opt">${esc(o)}</button>`).join('');
+    const opts = shuffle([w, ...others]);
+    $('#answers').innerHTML = opts.map((x) =>
+      `<button class="opt" data-wid="${esc(x.id)}">${esc(x.meaning)}</button>`
+    ).join('');
     $$('#answers .opt').forEach((btn) => {
-      btn.addEventListener('click', () => onChoiceAnswer(btn, w.meaning, w));
+      btn.addEventListener('click', () => onChoiceAnswer(btn, w));
     });
     return;
   }
 
   if (session.mode === 'def') {
-    // значение → выбери слово (варианты желательно из той же категории)
+    // значение → выбери слово (варианты из той же категории)
     $('#card').innerHTML = `
       <div class="meaning-prompt">${esc(w.meaning)}</div>
       ${w.category ? `<div class="cat">📁 ${esc(w.category)}</div>` : ''}
       <div class="hint">каким словом это называется?</div>`;
-    const opts = shuffle([w, ...wordOptions(w)]).map((x) => stressed(x));
-    $('#answers').innerHTML = opts.map((o) => `<button class="opt">${o}</button>`).join('');
+    const opts = shuffle([w, ...wordOptions(w)]);
+    $('#answers').innerHTML = opts.map((x) =>
+      `<button class="opt" data-wid="${esc(x.id)}">${stressed(x)}</button>`
+    ).join('');
     $$('#answers .opt').forEach((btn) => {
-      btn.addEventListener('click', () => onChoiceAnswer(btn, w.word, w));
+      btn.addEventListener('click', () => onChoiceAnswer(btn, w));
     });
     return;
   }
@@ -732,14 +737,69 @@ function nextItem() {
       const val = $('#type-input').value;
       if (!val.trim()) return;
       const ok = normalizeAnswer(val) === normalizeAnswer(w.word);
+      session.locked = true;
       $('#type-input').disabled = true;
       $('#type-result').innerHTML = ok
         ? `<div class="type-ok">✓ Верно! <b>${stressed(w)}</b></div>`
         : `<div class="type-bad">✗ Правильно: <b>${stressed(w)}</b></div>`;
-      submitAnswer(ok, ok ? 900 : 1800);
+      session.pendingOk = ok;
+      showNextBtn(ok);
     });
     setTimeout(() => { const el = $('#type-input'); if (el) el.focus(); }, 60);
   }
+}
+
+/** Кнопка перехода к следующему варианту (после ответа). */
+function showNextBtn(ok) {
+  const box = $('#answer-next');
+  if (!session) return;
+  const last = session.i >= session.list.length - 1;
+  $('#btn-next').textContent = last ? '🏁 Завершить занятие' : 'Следующее слово →';
+  box.hidden = false;
+}
+
+function hideNextBtn() {
+  $('#answer-next').hidden = true;
+}
+
+/**
+ * Общий обработчик вариантов (тесты «слово→значение» и «значение→слово»).
+ * До ответа — выбор; после ответа — любой вариант можно раскрыть и
+ * посмотреть, что за слово/значение там скрывалось.
+ */
+function onChoiceAnswer(btn, w) {
+  if (!session) return;
+
+  // фаза 2: после ответа — раскрываем подробности варианта по клику
+  if (session.locked) {
+    toggleOptionDetail(btn, w);
+    return;
+  }
+
+  // фаза 1: ответ
+  session.locked = true;
+  const ok = btn.dataset.wid === w.id;
+  session.pendingOk = ok;
+  $$('#answers .opt').forEach((b) => {
+    if (b.dataset.wid === w.id) b.classList.add('right'); // правильный — сразу зелёным
+  });
+  if (!ok) btn.classList.add('wrong');
+  showNextBtn(ok);
+}
+
+/** Показать/скрыть, что скрывалось за вариантом. */
+function toggleOptionDetail(btn, w) {
+  const existing = btn.querySelector('.opt-detail');
+  if (existing) { existing.remove(); return; }
+  const other = allWords().find((x) => x.id === btn.dataset.wid);
+  if (!other) return;
+  const span = document.createElement('span');
+  span.className = 'opt-detail';
+  // в тесте «слово → перевод» вариант-значение раскрываем словом, и наоборот
+  span.innerHTML = session.mode === 'def'
+    ? '💬 ' + esc(other.meaning)
+    : '➡ ' + stressed(other) + (other.category ? ` <em>${esc(other.category)}</em>` : '');
+  btn.appendChild(span);
 }
 
 function flipCard() {
@@ -758,35 +818,19 @@ function flipCard() {
   $('#btn-know').hidden = false;
 }
 
-/** Общий обработчик выбора из вариантов (тесты «слово→значение» и «значение→слово»). */
-function normAnswer(s) {
-  return String(s).toLowerCase().replace(/ё/g, 'е').replace(/[\s\u0301-]+/g, '');
-}
-
-function onChoiceAnswer(btn, correctText, w) {
-  if (!session || session.locked) return;
-  const ok = normAnswer(btn.textContent) === normAnswer(correctText);
-  $$('#answers .opt').forEach((b) => {
-    b.disabled = true;
-    // правильный вариант подсвечиваем сразу и всегда
-    if (normAnswer(b.textContent) === normAnswer(correctText)) b.classList.add('right');
-  });
-  if (!ok) btn.classList.add('wrong');
-  // блокировку ставит сам submitAnswer — здесь её не трогаем (иначе переход «залипает»)
-  submitAnswer(ok, ok ? 700 : 1600);
-}
-
 function finishSession() {
   $('#study-session').hidden = true;
   $('#study-idle').hidden = false;
   $('#result').textContent = `🎉 Готово! Правильных ответов: ${session.right} из ${session.list.length}`;
   session = null;
+  hideNextBtn();
   renderAll();
 }
 
 function exitSession() {
   if (!confirm('Выйти и не закончить занятие?')) return;
   session = null;
+  hideNextBtn();
   $('#study-session').hidden = true;
   $('#study-idle').hidden = false;
   renderStudy();
@@ -989,6 +1033,12 @@ function bindUI() {
   $('#card').addEventListener('click', flipCard);
   $('#btn-know').addEventListener('click', () => submitAnswer(true, 0));
   $('#btn-no').addEventListener('click', () => submitAnswer(false, 0));
+  $('#btn-next').addEventListener('click', () => {
+    if (!session || !session.locked) return;
+    const ok = !!session.pendingOk;
+    hideNextBtn();
+    submitAnswer(ok, 0);
+  });
 
   // набор слов: всё / избранное / категории
   $('.scope-row').addEventListener('click', (e) => {
