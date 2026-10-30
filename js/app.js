@@ -11,6 +11,7 @@ const cloudEnabled = !!(CLOUD.url && CLOUD.key);
 let profile = null;   // имя пользователя (сохраняется между визитами)
 let dictWords = [];   // словарь (из облака; офлайн — из кэша/файлов)
 let progress = {};    // id -> {box, correct, wrong, last_review}
+let favorites = new Set(); // id избранных слов
 let session = null;
 let syncTimer = null;
 let wordCardId = null;
@@ -18,6 +19,10 @@ let wordCardId = null;
 // каталог
 let activeCategory = '';
 let viewMode = localStorage.getItem('erudit_view') || 'list';
+
+// занятие: набор слов и режим теста
+let studyScope = 'all';                 // 'all' | 'fav' | 'cats'
+let selectedCats = new Set(load('erudit_scope_cats', []));
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => document.querySelectorAll(s);
@@ -43,15 +48,41 @@ function load(key, fallback) {
 }
 function save(key, val) { localStorage.setItem(key, JSON.stringify(val)); }
 
-async function sha256(s) {
-  try {
-    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('erudit:' + s));
-    return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
-  } catch (e) {
-    let h = 5381;
-    for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
-    return 'x' + h.toString(16);
+/* ================== ТЕМА ================== */
+
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  localStorage.setItem('erudit_theme', t);
+  const b = $('#btn-theme');
+  if (b) b.textContent = t === 'dark' ? '☀️' : '🌙';
+}
+
+function toggleTheme() {
+  applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+}
+
+/* ================== ВЫДЕЛЕНИЕ СЛОВА В ПРИМЕРАХ ================== */
+
+/** HTML-текст с <b> на всех встречах основы слова (с учётом склонений). */
+function boldStem(text, word) {
+  const w = String(word || '').toLowerCase();
+  if (!w) return esc(text);
+  const stem = w.length <= 5 ? w : w.slice(0, w.length - 2);
+  const re = new RegExp(stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ё/g, '[её]'), 'gi');
+  let out = '';
+  let last = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    out += esc(text.slice(last, m.index)) + '<b>' + esc(m[0]) + '</b>';
+    last = m.index + m[0].length;
+    if (m[0].length === 0) re.lastIndex++;
   }
+  return out + esc(text.slice(last));
+}
+
+function examplesHtml(w, cls) {
+  if (!w.examples || !w.examples.length) return '';
+  return `<ul class="${cls || 'examples'}">${w.examples.map((e) => `<li>${boldStem(e, w.word)}</li>`).join('')}</ul>`;
 }
 
 /* ================== ОБЛАКО (Supabase REST) ================== */
@@ -105,7 +136,7 @@ async function cloudDeleteWord(id) {
   if (!r.ok) throw new Error('cloud_delete_failed');
 }
 
-/* ---- профили (прогресс) ---- */
+/* ---- профили (прогресс + избранное) ---- */
 
 async function cloudGet(name) {
   const key = name.toLowerCase();
@@ -126,13 +157,16 @@ async function cloudUpsertProfile(row) {
   if (!r.ok) throw new Error('cloud_write_failed');
 }
 
-async function cloudSaveProgress(name, progress) {
+async function cloudSaveProfile(name) {
   const key = name.toLowerCase();
   const r = await fetch(`${CLOUD.url}/rest/v1/profiles?name=eq.${encodeURIComponent(key)}`, {
     method: 'PATCH',
     headers: cloudHeaders(),
-    // колонка в таблице называется data (jsonb) — прогресс лежит внутри неё
-    body: JSON.stringify({ data: { progress }, updated_at: new Date().toISOString() })
+    // колонка в таблице называется data (jsonb) — прогресс и избранное внутри неё
+    body: JSON.stringify({
+      data: { progress, favorites: [...favorites] },
+      updated_at: new Date().toISOString()
+    })
   });
   if (!r.ok) throw new Error('cloud_write_failed');
 }
@@ -143,7 +177,7 @@ function queueSync() {
   clearTimeout(syncTimer);
   syncTimer = setTimeout(async () => {
     try {
-      await cloudSaveProgress(profile, progress);
+      await cloudSaveProfile(profile);
       $('#status').textContent = '☁ сохранено';
       setTimeout(() => renderStudy(), 1500);
     } catch (e) {
@@ -193,35 +227,39 @@ async function login(name, pin) {
     const row = await cloudGet(key);
 
     if (!row) {
-      // новый профиль — подтягиваем локальный прогресс этого устройства, если был
       const localProgress = load('erudit_progress_v1', null) || load(profileKeyOf(key, 'progress_v2'), {}) || {};
       await cloudUpsertProfile({
         name: key,
         pin_hash: hash,
-        data: { progress: localProgress, display_name: name.trim() },
+        data: { progress: localProgress, favorites: [], display_name: name.trim() },
         updated_at: new Date().toISOString()
       });
     } else if (row.pin_hash !== hash) {
       throw new Error('Неверный ПИН для ника «' + name.trim() + '»');
     }
 
-    // прогресс в облаке лежит внутри поля data
     const cloudData = (row && row.data) || {};
     const cloudProgress = cloudData.progress || {};
     const localProgress = load(profileKeyOf(key, 'progress_v2'), {});
     const merged = mergeProgress(localProgress, cloudProgress);
 
+    const localFav = load(profileKeyOf(key, 'favorites'), []) || [];
+    const cloudFav = cloudData.favorites || [];
+    const mergedFav = [...new Set([...localFav, ...cloudFav])];
+
     profile = name.trim().slice(0, 30);
     saveSession();
     save(profileKey('progress_v2'), merged);
-    // синхронизация сразу после входа; сетевой сбой не должен ломать вход
+    save(profileKey('favorites'), mergedFav);
+    progress = merged;
+    favorites = new Set(mergedFav);
+
     try {
-      await cloudSaveProgress(profile, merged);
+      await cloudSaveProfile(profile);
     } catch (e) {
       console.warn('Не удалось сразу синхронизировать, повторится при следующем ответе', e);
     }
   } else {
-    // локальный режим (без облака)
     profile = name.trim().slice(0, 30);
     saveSession();
     if (!localStorage.getItem(profileKey('progress_v2'))) {
@@ -242,7 +280,7 @@ function showLogin() {
 
   $('#login-pin').hidden = !cloudEnabled;
   $('#login-hint').textContent = cloudEnabled
-    ? 'Придумай ник и ПИН-код. С того же ника и ПИНа твой прогресс откроется на любом устройстве.'
+    ? 'Придумай ник и ПИН-код. С того же ника и ПИНА твой прогресс откроется на любом устройстве.'
     : 'Как тебя называть? Под этим именем сохранится твой прогресс на этом устройстве.';
 }
 
@@ -252,6 +290,17 @@ function enterApp() {
   $('#user-chip').textContent = profile;
   switchTab('study');
   renderAll();
+}
+
+async function sha256(s) {
+  try {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('erudit:' + s));
+    return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  } catch (e) {
+    let h = 5381;
+    for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+    return 'x' + h.toString(16);
+  }
 }
 
 /* ================== СЛОВАРЬ ================== */
@@ -269,7 +318,6 @@ function normalizeWord(w) {
 }
 
 async function loadWords() {
-  // 1) облако — главный источник
   if (cloudEnabled) {
     try {
       dictWords = await cloudGetWords();
@@ -280,10 +328,8 @@ async function loadWords() {
       console.warn('Словарь из облака недоступен, беру локальную копию', e);
     }
   }
-  // 2) локальный кэш
   const cached = load('erudit_words_cache', null);
   if (cached && cached.length) { dictWords = cached; return; }
-  // 3) встроенные файлы (первый запуск офлайн)
   try {
     const a = await fetch('data/words.json').then((r) => r.json());
     const b = await fetch('data/words-2.json').then((r) => r.json()).catch(() => []);
@@ -295,7 +341,6 @@ async function loadWords() {
   }
 }
 
-/* Свои слова из старых версий переносятся в общий словарь облака */
 async function migrateLegacyCustomWords() {
   const have = new Set(dictWords.map((w) => w.id));
   const sources = [load('erudit_custom_v1', []) || [], load(profileKey('custom_v2'), []) || []];
@@ -316,10 +361,11 @@ function allWords() {
   return dictWords;
 }
 
-/* ================== ПРОГРЕСС ================== */
+/* ================== ПРОГРЕСС И ИЗБРАННОЕ ================== */
 
 function loadState() {
   progress = load(profileKey('progress_v2'), {});
+  favorites = new Set(load(profileKey('favorites'), []) || []);
 }
 
 function prog(id) {
@@ -328,6 +374,15 @@ function prog(id) {
 
 function saveProgress() {
   save(profileKey('progress_v2'), progress);
+  queueSync();
+}
+
+function isFavorite(id) { return favorites.has(id); }
+
+function toggleFavorite(id) {
+  if (favorites.has(id)) favorites.delete(id);
+  else favorites.add(id);
+  save(profileKey('favorites'), [...favorites]);
   queueSync();
 }
 
@@ -365,6 +420,27 @@ function stressed(w) {
   return esc(word.slice(0, i + 1)) + '\u0301' + esc(word.slice(i + 1));
 }
 
+/* ================== НАБОР СЛОВ (ВСЁ / ИЗБРАННОЕ / КАТЕГОРИИ) ================== */
+
+function scopeWords() {
+  let pool = allWords();
+  if (studyScope === 'fav') pool = pool.filter((w) => favorites.has(w.id));
+  else if (studyScope === 'cats') pool = pool.filter((w) => selectedCats.has(w.category));
+  return pool;
+}
+
+function setScope(scope) {
+  studyScope = scope;
+  renderStudy();
+}
+
+function toggleScopeCat(cat) {
+  if (selectedCats.has(cat)) selectedCats.delete(cat);
+  else selectedCats.add(cat);
+  save('erudit_scope_cats', [...selectedCats]);
+  renderStudy();
+}
+
 /* ================== РЕНДЕР ================== */
 
 function renderAll() {
@@ -375,18 +451,38 @@ function renderAll() {
 }
 
 function renderStudy() {
-  const due = dueWords().length;
   const total = allWords().length;
+  const pool = scopeWords();
+  const due = pool.filter(isDue).length;
   $('#status').textContent = total ? `✓ ${total} слов` : '…';
+
+  const scopeLabel = studyScope === 'fav' ? `Избранное: ${pool.length}` :
+    studyScope === 'cats' ? `Категории: ${pool.length}` : `Все слова: ${pool.length}`;
+
   $('#due-info').innerHTML = total === 0
     ? 'Словарь пуст. Добавь слова во вкладке «Слова».'
-    : `В словаре: <b>${total}</b> слов<br>Пора повторить: <b>${due}</b>`;
+    : `${scopeLabel} (${favorites.size} избр.)<br>Пора повторить: <b>${due}</b>`;
+
+  $$('.scope-row .chip').forEach((c) => c.classList.toggle('active', c.dataset.scope === studyScope));
+  $('#scope-cats').hidden = studyScope !== 'cats';
+
+  const cats = [...new Set(allWords().map((w) => w.category).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ru'));
+  if (studyScope === 'cats') {
+    $('#scope-cats').innerHTML = cats.map((c) =>
+      `<button class="chip ${selectedCats.has(c) ? 'active' : ''}" data-scopecat="${esc(c)}">${esc(c)} (${allWords().filter((w) => w.category === c).length})</button>`
+    ).join('') || '<span class="muted">В словаре пока нет категорий — задай их при добавлении слов</span>';
+  }
+
+  // кнопка старта блокируется, если набор пуст
+  $('#btn-start').disabled = pool.length === 0;
+  $('#btn-start').style.opacity = pool.length === 0 ? '.5' : '1';
 }
 
 function renderWords() {
   const q = $('#search').value.trim().toLowerCase();
   const list = allWords().filter((w) =>
-    (activeCategory === '' || (w.category || '') === activeCategory) &&
+    (activeCategory === '' ||
+      (activeCategory === '__fav__' ? favorites.has(w.id) : (w.category || '') === activeCategory)) &&
     (!q || (w.word + ' ' + w.meaning + ' ' + (w.category || '')).toLowerCase().includes(q))
   );
   $('#word-list').classList.toggle('grid', viewMode === 'grid');
@@ -396,7 +492,7 @@ function renderWords() {
       const p = prog(w.id);
       return `
       <div class="gcard" data-id="${esc(w.id)}">
-        <div class="gw">${stressed(w)}</div>
+        <div class="gw">${isFavorite(w.id) ? '⭐ ' : ''}${stressed(w)}</div>
         <div class="gm">${esc(w.meaning)}</div>
         <div class="gb">📦 ${p.box || 1}${w.category ? ' · ' + esc(w.category) : ''}</div>
       </div>`;
@@ -415,6 +511,7 @@ function renderWords() {
       </div>
       <div class="w-meta">📦 ${p.box || 1}<br>✓${p.correct || 0} ✗${p.wrong || 0}</div>
       <div class="w-actions">
+        <button class="icon-mini ${isFavorite(w.id) ? 'fav-on' : ''}" data-act="fav" title="Избранное">${isFavorite(w.id) ? '★' : '☆'}</button>
         <button class="icon-mini" data-act="edit" title="Редактировать">✎</button>
         <button class="icon-mini" data-act="del" title="Удалить">🗑</button>
       </div>
@@ -428,6 +525,7 @@ function renderChips() {
   allWords().forEach((w) => { if (w.category) counts[w.category] = (counts[w.category] || 0) + 1; });
   $('#cat-chips').innerHTML = `
     <button class="chip ${activeCategory === '' ? 'active' : ''}" data-cat="">Все (${allWords().length})</button>
+    <button class="chip ${activeCategory === '__fav__' ? 'active' : ''}" data-cat="__fav__">⭐ Избранные (${favorites.size})</button>
     ${cats.map((c) => `<button class="chip ${activeCategory === c ? 'active' : ''}" data-cat="${esc(c)}">${esc(c)} (${counts[c]})</button>`).join('')}`;
 }
 
@@ -448,7 +546,7 @@ function openWordCard(id) {
     ${w.category ? `<div class="wf-cat">📁 ${esc(w.category)}</div>` : ''}
     <div class="wf-meaning">${esc(w.meaning)}</div>
     ${w.etymology ? `<div class="etym">📖 <b>Происхождение.</b> ${esc(w.etymology)}</div>` : ''}
-    ${w.examples && w.examples.length ? `<ul class="examples">${w.examples.map((e) => `<li>${esc(e)}</li>`).join('')}</ul>` : ''}
+    ${examplesHtml(w)}
     <div class="wf-progress">
       <span>📦 коробка ${p.box || 1}</span>
       <span>✓ ${p.correct || 0}</span>
@@ -456,8 +554,9 @@ function openWordCard(id) {
       <span>🔁 ${nextRepeatText(p)}</span>
     </div>
     <div class="wf-actions">
+      <button class="ghost ${isFavorite(w.id) ? 'fav-btn-on' : ''}" data-act="fav">${isFavorite(w.id) ? '★ В избранном' : '☆ В избранное'}</button>
       <button class="ghost" data-act="edit">✎ Редактировать</button>
-      <button class="ghost danger-outline" data-act="del">🗑 Удалить</button>
+      <button class="ghost danger-outline" data-act="del">🗑</button>
     </div>
     <button id="wf-close" class="primary">Закрыть</button>
   `;
@@ -521,24 +620,48 @@ function switchTab(name) {
   window.scrollTo(0, 0);
 }
 
-/* ================== ЗАНЯТИЕ ================== */
+/* ================== ЗАНЯТИЕ: 4 РЕЖИМА ================== */
 
 function startSession() {
   const mode = document.querySelector('input[name="mode"]:checked').value;
-  let list = shuffle(dueWords()).slice(0, SESSION_SIZE);
+  const pool = scopeWords();
+  if (pool.length === 0) { alert('Выбранный набор пуст — добавь слова или выбери другие категории.'); return; }
 
+  let list = shuffle(pool.filter(isDue)).slice(0, SESSION_SIZE);
   if (list.length === 0) {
-    const all = allWords();
-    if (all.length === 0) return;
-    if (!confirm('На сегодня всё повторено. Пройти слова всё равно?')) return;
-    list = shuffle(all).slice(0, SESSION_SIZE);
+    if (!confirm('В выбранном наборе всё повторено. Пройти всё равно?')) return;
+    list = shuffle(pool).slice(0, SESSION_SIZE);
   }
 
-  session = { mode, list: [...list], i: 0, right: 0, flipped: false };
+  session = { mode, list: [...list], i: 0, right: 0, flipped: false, locked: false };
   $('#study-idle').hidden = true;
   $('#study-session').hidden = false;
   $('#result').textContent = '';
   nextItem();
+}
+
+/** Общее завершение ответа: засчитать и перейти дальше. */
+function submitAnswer(ok, delayMs) {
+  if (!session || session.locked) return;
+  session.locked = true;
+  setTimeout(() => {
+    if (!session) return;
+    answer(session.list[session.i].id, ok);
+    if (ok) session.right++;
+    if (session.i >= session.list.length - 1) finishSession();
+    else { session.locked = false; session.i++; nextItem(); }
+  }, delayMs || 0);
+}
+
+/** Варианты-слова для теста «определение → слово»: сначала той же категории. */
+function wordOptions(w) {
+  const same = allWords().filter((x) => x.id !== w.id && x.category && x.category === w.category);
+  const others = allWords().filter((x) => x.id !== w.id && x.category !== w.category);
+  return shuffle([...shuffle(same).slice(0, 3), ...shuffle(others)]).slice(0, 3);
+}
+
+function normalizeAnswer(s) {
+  return String(s).toLowerCase().replace(/ё/g, 'е').replace(/[\s\-]+/g, '').replace(/\u0301/g, '');
 }
 
 function nextItem() {
@@ -549,13 +672,18 @@ function nextItem() {
   $('#answers').innerHTML = '';
   $('#card').classList.remove('flipped');
   session.flipped = false;
+  session.locked = false;
 
   if (session.mode === 'cards') {
     $('#card').innerHTML = `
       <div class="word">${stressed(w)}</div>
-      ${w.category ? `<div class="cat">${esc(w.category)}</div>` : ''}
+      ${w.category ? `<div class="cat">📁 ${esc(w.category)}</div>` : ''}
       <div class="hint">нажми на карточку, чтобы проверить себя</div>`;
-  } else {
+    return;
+  }
+
+  if (session.mode === 'quiz') {
+    // слово → выбери значение
     $('#card').innerHTML = `
       <div class="word">${stressed(w)}</div>
       <div class="hint">выбери правильное значение</div>`;
@@ -564,8 +692,50 @@ function nextItem() {
     const opts = shuffle([w, ...others]).map((x) => x.meaning);
     $('#answers').innerHTML = opts.map((o) => `<button class="opt">${esc(o)}</button>`).join('');
     $$('#answers .opt').forEach((btn) => {
-      btn.addEventListener('click', () => onQuizAnswer(btn, w));
+      btn.addEventListener('click', () => onChoiceAnswer(btn, w.meaning, w));
     });
+    return;
+  }
+
+  if (session.mode === 'def') {
+    // значение → выбери слово (варианты желательно из той же категории)
+    $('#card').innerHTML = `
+      <div class="meaning-prompt">${esc(w.meaning)}</div>
+      ${w.category ? `<div class="cat">📁 ${esc(w.category)}</div>` : ''}
+      <div class="hint">каким словом это называется?</div>`;
+    const opts = shuffle([w, ...wordOptions(w)]).map((x) => stressed(x));
+    $('#answers').innerHTML = opts.map((o) => `<button class="opt">${o}</button>`).join('');
+    $$('#answers .opt').forEach((btn) => {
+      btn.addEventListener('click', () => onChoiceAnswer(btn, w.word, w));
+    });
+    return;
+  }
+
+  if (session.mode === 'type') {
+    // значение → напиши слово сам
+    $('#card').innerHTML = `
+      <div class="meaning-prompt">${esc(w.meaning)}</div>
+      ${w.category ? `<div class="cat">📁 ${esc(w.category)}</div>` : ''}
+      <div class="hint">напиши слово</div>`;
+    $('#answers').innerHTML = `
+      <form id="type-form" class="type-form">
+        <input id="type-input" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="слово…">
+        <button class="primary" type="submit">Проверить</button>
+      </form>
+      <div id="type-result"></div>`;
+    $('#type-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      if (!session || session.locked) return;
+      const val = $('#type-input').value;
+      if (!val.trim()) return;
+      const ok = normalizeAnswer(val) === normalizeAnswer(w.word);
+      $('#type-input').disabled = true;
+      $('#type-result').innerHTML = ok
+        ? `<div class="type-ok">✓ Верно! <b>${stressed(w)}</b></div>`
+        : `<div class="type-bad">✗ Правильно: <b>${stressed(w)}</b></div>`;
+      submitAnswer(ok, ok ? 900 : 1800);
+    });
+    setTimeout(() => { const el = $('#type-input'); if (el) el.focus(); }, 60);
   }
 }
 
@@ -574,31 +744,28 @@ function flipCard() {
   session.flipped = true;
   const w = session.list[session.i];
   $('#card').classList.add('flipped');
+  // слово остаётся видимым — его же мы и изучаем
   $('#card').innerHTML = `
+    <div class="word word-answer">${stressed(w)}</div>
     <div class="translation">${esc(w.meaning)}</div>
     ${w.etymology ? `<div class="etym">📖 ${esc(w.etymology)}</div>` : ''}
-    ${w.examples && w.examples.length ? `<ul class="examples">${w.examples.map((e) => `<li>${esc(e)}</li>`).join('')}</ul>` : ''}
+    ${examplesHtml(w)}
     <div class="hint">ты помнил значение?</div>`;
   $('#btn-no').hidden = false;
   $('#btn-know').hidden = false;
 }
 
-function onQuizAnswer(btn, w) {
-  if (!session) return;
-  const ok = btn.textContent.trim().toLowerCase() === String(w.meaning).trim().toLowerCase();
+/** Общий обработчик выбора из вариантов (тесты «слово→значение» и «значение→слово»). */
+function onChoiceAnswer(btn, correctText, w) {
+  if (!session || session.locked) return;
+  session.locked = true;
+  const ok = btn.textContent.trim() === String(correctText).trim();
   $$('#answers .opt').forEach((b) => {
     b.disabled = true;
-    if (b.textContent.trim().toLowerCase() === String(w.meaning).trim().toLowerCase()) {
-      b.classList.add('right');
-    }
+    if (b.textContent.trim() === String(correctText).trim()) b.classList.add('right');
   });
   if (!ok) btn.classList.add('wrong');
-  setTimeout(() => answer(w.id, ok), ok ? 500 : 1100);
-  setTimeout(() => {
-    if (!session) return;
-    if (session.i >= session.list.length - 1) finishSession();
-    else { session.i++; nextItem(); }
-  }, ok ? 700 : 1400);
+  submitAnswer(ok, ok ? 700 : 1600);
 }
 
 function finishSession() {
@@ -642,7 +809,6 @@ async function onAddWord(e) {
     try { await cloudUpsertWord(newWord); savedToCloud = true; }
     catch (err) { console.warn('Слово не сохранилось в облако', err); }
   }
-  // слово сразу видно на этом устройстве и попадает в кэш
   if (!dictWords.some((w) => w.id === newWord.id)) {
     dictWords.push(newWord);
     dictWords.sort((a, b) => a.word.localeCompare(b.word, 'ru'));
@@ -660,11 +826,15 @@ async function onWordListClick(e) {
   const id = row.dataset.id;
   const actBtn = e.target.closest('button[data-act]');
 
+  if (actBtn && actBtn.dataset.act === 'fav') {
+    toggleFavorite(id);
+    renderAll();
+    return;
+  }
   if (actBtn && actBtn.dataset.act === 'edit') {
     await editWord(id);
     return;
   }
-
   if (actBtn && actBtn.dataset.act === 'del') {
     await deleteWord(id);
     return;
@@ -697,6 +867,8 @@ async function deleteWord(id) {
   if (!confirm(`Удалить «${w.word}» из словаря? Прогресс по нему тоже удалится.`)) return;
   dictWords = dictWords.filter((x) => x.id !== id);
   delete progress[id];
+  favorites.delete(id);
+  save(profileKey('favorites'), [...favorites]);
   save('erudit_words_cache', dictWords);
   saveProgress();
   if (cloudEnabled) {
@@ -708,7 +880,9 @@ async function deleteWord(id) {
 /* ================== ЭКСПОРТ / ИМПОРТ / СБРОС ================== */
 
 function exportData() {
-  const data = JSON.stringify({ app: 'erudit', version: 3, profile, progress, words: dictWords }, null, 2);
+  const data = JSON.stringify({
+    app: 'erudit', version: 4, profile, progress, favorites: [...favorites], words: dictWords
+  }, null, 2);
   const blob = new Blob([data], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -727,6 +901,11 @@ function importData(file) {
         progress = mergeProgress(data.progress, progress);
         saveProgress();
         restored++;
+      }
+      if (Array.isArray(data.favorites)) {
+        favorites = new Set([...favorites, ...data.favorites]);
+        save(profileKey('favorites'), [...favorites]);
+        queueSync();
       }
       if (Array.isArray(data.words) && cloudEnabled) {
         for (const w of data.words) {
@@ -761,7 +940,7 @@ function openModal(msg) {
   $('#modal').hidden = false;
   $('#modal-msg').textContent = msg ||
     (cloudEnabled
-      ? `Ты вошёл как «${profile}». Прогресс и словарь синхронизируются с облаком — на другом устройстве войди тем же ником и ПИНом.`
+      ? `Ты вошёл как «${profile}». Прогресс, избранное и словарь синхронизируются с облаком — на другом устройстве войди тем же ником и ПИНом.`
       : `Ты вошёл как «${profile}». Прогресс хранится в этом браузере. Сделай резервную копию, чтобы не потерять его.`);
 }
 
@@ -800,17 +979,17 @@ function bindUI() {
   $('#btn-start').addEventListener('click', startSession);
   $('#btn-exit').addEventListener('click', exitSession);
   $('#card').addEventListener('click', flipCard);
-  $('#btn-know').addEventListener('click', () => {
-    if (!session) return;
-    answer(session.list[session.i].id, true);
-    if (session.i >= session.list.length - 1) finishSession();
-    else { session.i++; nextItem(); }
+  $('#btn-know').addEventListener('click', () => submitAnswer(true, 0));
+  $('#btn-no').addEventListener('click', () => submitAnswer(false, 0));
+
+  // набор слов: всё / избранное / категории
+  $('.scope-row').addEventListener('click', (e) => {
+    const chip = e.target.closest('.chip');
+    if (chip) setScope(chip.dataset.scope);
   });
-  $('#btn-no').addEventListener('click', () => {
-    if (!session) return;
-    answer(session.list[session.i].id, false);
-    if (session.i >= session.list.length - 1) finishSession();
-    else { session.i++; nextItem(); }
+  $('#scope-cats').addEventListener('click', (e) => {
+    const chip = e.target.closest('.chip');
+    if (chip) toggleScopeCat(chip.dataset.scopecat);
   });
 
   $('#add-form').addEventListener('submit', onAddWord);
@@ -818,7 +997,7 @@ function bindUI() {
   $('#word-list').addEventListener('click', onWordListClick);
   $('#btn-reset').addEventListener('click', onResetProgress);
 
-  // каталог: переключение списка/сетки и фильтр по категориям
+  // каталог: список/сетка и фильтры
   function setView(mode) {
     viewMode = mode;
     localStorage.setItem('erudit_view', mode);
@@ -843,6 +1022,12 @@ function bindUI() {
     const actBtn = e.target.closest('.wf-actions button[data-act]');
     if (actBtn && wordCardId) {
       const act = actBtn.dataset.act;
+      if (act === 'fav') {
+        toggleFavorite(wordCardId);
+        renderAll();
+        openWordCard(wordCardId);
+        return;
+      }
       closeWordCard();
       if (act === 'edit') await editWord(wordCardId);
       if (act === 'del') await deleteWord(wordCardId);
@@ -852,6 +1037,7 @@ function bindUI() {
   });
 
   $('#btn-settings').addEventListener('click', () => openModal());
+  $('#btn-theme').addEventListener('click', toggleTheme);
   $('#modal-close').addEventListener('click', closeModal);
   $('#modal').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeModal(); });
   $('#btn-export').addEventListener('click', exportData);
@@ -869,6 +1055,7 @@ function bindUI() {
 
 async function init() {
   bindUI();
+  applyTheme(document.documentElement.dataset.theme || localStorage.getItem('erudit_theme') || 'light');
   await loadWords();
 
   loadSession();

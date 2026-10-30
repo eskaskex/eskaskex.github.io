@@ -9,6 +9,31 @@
   --success: #16a34a;
   --warn: #d97706;
   --radius: 14px;
+  --border: #e5e7eb;
+  --input-border: #d1d5db;
+  --opt-bg: #fafafa;
+  --soft-bg: #f9fafb;
+  --span-bg: #f3f4f6;
+  --text-2: #374151;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0e1016;
+  --card: #171a23;
+  --text: #e9eaf0;
+  --muted: #9aa1b1;
+  --danger: #f87171;
+  --success: #4ade80;
+  --warn: #fbbf24;
+  --border: #2a2e3c;
+  --input-border: #3a3f50;
+  --opt-bg: #1d212c;
+  --soft-bg: #1b1e28;
+  --span-bg: #242836;
+  --text-2: #c3c7d4;
+  --accent: #7c7ff5;
+  --accent-dark: #6366f1;
 }
 
 * { box-sizing: border-box; }
@@ -47,7 +72,7 @@ body {
 .tabs {
   display: flex;
   background: var(--card);
-  border-bottom: 1px solid #e5e7eb;
+  border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
   z-index: 5;
@@ -152,14 +177,15 @@ button { font-family: inherit; }
 .answers .opt {
   padding: 13px;
   border-radius: 10px;
-  border: 1px solid #e5e7eb;
-  background: #fafafa;
+  border: 1px solid var(--border);
+  background: var(--opt-bg);
   font-size: 16px;
   cursor: pointer;
   word-break: break-word;
+  color: var(--text);
 }
-.answers .opt.right { background: #dcfce7; border-color: var(--success); }
-.answers .opt.wrong { background: #fee2e2; border-color: var(--danger); }
+.answers .opt.right { background: #dcfce7; border-color: var(--success); color: #14532d; }
+.answers .opt.wrong { background: #fee2e2; border-color: var(--danger); color: #7f1d1d; }
 .answers .opt:disabled { cursor: default; }
 
 #result { margin-top: 14px; text-align: center; font-size: 16px; }
@@ -169,12 +195,14 @@ button { font-family: inherit; }
 .add-form { display: flex; flex-direction: column; gap: 10px; }
 .add-form .row { display: flex; gap: 10px; }
 .add-form input, .modal-box input, .search {
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--input-border);
   border-radius: 10px;
   padding: 11px 13px;
   font-size: 15px;
   font-family: inherit;
   width: 100%;
+  background: var(--card);
+  color: var(--text);
 }
 .add-form .row input { flex: 1; }
 .search { margin-bottom: 12px; background: var(--card); border: none; }
@@ -215,7 +243,7 @@ button { font-family: inherit; }
 .blabel { font-size: 12px; color: var(--muted); margin-top: 6px; }
 .bnum { font-size: 14px; font-weight: 600; }
 
-#worst .wordrow { box-shadow: none; border: 1px solid #f3f4f6; }
+#worst .wordrow { box-shadow: none; border: 1px solid var(--span-bg); }
 
 /* ===== Модалка ===== */
 .modal {
@@ -227,7 +255,8 @@ button { font-family: inherit; }
 }
 .modal[hidden] { display: none; } /* важно: display:flex выше перебивал атрибут hidden */
 .modal-box {
-  background: #fff;
+  background: var(--card);
+  color: var(--text);
   border-radius: var(--radius);
   padding: 22px;
   width: 100%;
@@ -236,7 +265,7 @@ button { font-family: inherit; }
 .modal-box h2 { margin-top: 0; font-size: 18px; }
 .modal-box .lbl { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 6px; }
 .modal-actions { display: flex; gap: 10px; margin-top: 16px; }
-.modal-actions .ghost { border: 1px solid #e5e7eb; }
+.modal-actions .ghost { border: 1px solid var(--border); }
 
 @media (max-width: 480px) {
   .add-form .row { flex-direction: column; }
@@ -276,8 +305,9 @@ button { font-family: inherit; }
   text-align: left;
   font-size: 14px;
   line-height: 1.5;
-  color: #374151;
+  color: var(--text-2);
 }
+.card .examples b { color: var(--text); }
 .card .examples li { margin-bottom: 5px; }
 
 /* ===== Каталог слов ===== */
@@ -304,7 +334,7 @@ button { font-family: inherit; }
   -webkit-overflow-scrolling: touch;
 }
 .chip {
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--border);
   background: var(--card);
   border-radius: 999px;
   padding: 7px 14px;
@@ -345,13 +375,15 @@ button { font-family: inherit; }
   font-size: 12.5px; color: var(--muted);
 }
 .wf-progress span {
-  background: #f3f4f6;
+  background: var(--span-bg);
   border-radius: 8px;
   padding: 5px 10px;
 }
 .wf-actions { display: flex; gap: 8px; margin-top: 10px; }
-.wf-actions .ghost { border: 1px solid #e5e7eb; }
+.wf-actions .ghost { border: 1px solid var(--border); }
 .word-full .primary { margin-top: 12px; }
+.word-full .examples { color: var(--text-2); }
+.word-full .examples b { color: var(--text); }
 
 /* ===== Статистика: коробки ===== */
 .statgrid { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
@@ -360,7 +392,7 @@ button { font-family: inherit; }
 .box-rows { display: flex; flex-direction: column; gap: 10px; }
 .boxrow {
   display: flex; gap: 12px; align-items: center;
-  background: #f9fafb;
+  background: var(--soft-bg);
   border-radius: 12px;
   padding: 10px 12px;
 }
@@ -382,9 +414,51 @@ button { font-family: inherit; }
 .boxbar {
   margin-top: 6px;
   height: 6px;
-  background: #e5e7eb;
+  background: var(--border);
   border-radius: 999px;
   overflow: hidden;
 }
 .boxbar i { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
 .boxcount { font-size: 20px; font-weight: 700; flex-shrink: 0; }
+
+/* ===== Набор слов (всё / избранное / категории) ===== */
+.scope-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.scope-cats {
+  display: flex; gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+/* ===== Режим «определение → слово» ===== */
+.card .meaning-prompt {
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+/* ===== Режим «напиши слово» ===== */
+.type-form { display: flex; gap: 8px; margin-top: 12px; }
+.type-form input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--input-border);
+  background: var(--card);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 12px;
+  font-size: 16px;
+  font-family: inherit;
+}
+.type-form .primary { width: auto; padding: 10px 18px; }
+.type-form .primary:disabled { opacity: .5; }
+.type-ok { margin-top: 10px; color: var(--success); font-weight: 600; }
+.type-bad { margin-top: 10px; color: var(--danger); font-weight: 600; }
+
+/* ===== Карточка после переворота: слово остаётся ===== */
+.card .word.word-answer { font-size: 21px; color: var(--muted); font-weight: 600; }
+.card .translation { font-size: 24px; }
+
+/* ===== Избранное ===== */
+.icon-mini.fav-on { color: #eab308; }
+.fav-btn-on { color: #eab308; border-color: #eab308 !important; }

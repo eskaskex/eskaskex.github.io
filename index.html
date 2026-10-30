@@ -10,6 +10,12 @@
   <link rel="icon" href="icons/icon-192.png">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
   <link rel="stylesheet" href="css/style.css">
+  <script>
+    // тема до первой отрисовки — без «вспышки» светлого интерфейса
+    try {
+      document.documentElement.dataset.theme = localStorage.getItem('erudit_theme') || 'light';
+    } catch (e) { document.documentElement.dataset.theme = 'light'; }
+  </script>
 </head>
 <body>
 
@@ -18,6 +24,7 @@
   <div class="topbar-right">
     <span id="user-chip" class="user-chip"></span>
     <span id="status" class="status">…</span>
+    <button id="btn-theme" class="icon-btn" title="Сменить тему">🌙</button>
     <button id="btn-settings" class="icon-btn" title="Настройки">⚙</button>
   </div>
 </header>
@@ -46,10 +53,23 @@
     <div id="study-idle">
       <div class="panel">
         <div id="due-info" class="due-info">Загрузка…</div>
+
+        <!-- набор слов -->
+        <div class="scope-row">
+          <button class="chip active" data-scope="all">🎲 Все</button>
+          <button class="chip" data-scope="fav">⭐ Избранные</button>
+          <button class="chip" data-scope="cats">📁 Категории</button>
+        </div>
+        <div id="scope-cats" class="scope-cats" hidden></div>
+
+        <!-- режим теста -->
         <div class="mode-select">
           <label><input type="radio" name="mode" value="cards" checked> 🃏 Карточки</label>
-          <label><input type="radio" name="mode" value="quiz"> ✅ Тест с вариантами</label>
+          <label><input type="radio" name="mode" value="quiz"> ✅ Слово → перевод</label>
+          <label><input type="radio" name="mode" value="def"> 🔁 Определение → слово</label>
+          <label><input type="radio" name="mode" value="type"> ⌨️ Напиши слово</label>
         </div>
+
         <button id="btn-start" class="primary big">Начать занятие</button>
         <div id="result"></div>
       </div>
@@ -130,7 +150,7 @@
     <h2>⚙ Данные</h2>
     <p id="modal-msg" class="muted"></p>
     <div class="modal-actions">
-      <button id="btn-export" class="primary">⬇ Скачать копию (прогресс + свои слова)</button>
+      <button id="btn-export" class="primary">⬇ Скачать копию (прогресс + своё)</button>
       <button id="btn-import" class="ghost">⬆ Загрузить копию</button>
       <button id="btn-logout" class="ghost">🚪 Сменить пользователя</button>
       <button id="modal-close" class="ghost">Закрыть</button>
