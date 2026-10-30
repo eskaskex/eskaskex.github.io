@@ -343,7 +343,7 @@ async function loadWords() {
 
 async function migrateLegacyCustomWords() {
   const have = new Set(dictWords.map((w) => w.id));
-  const sources = [load('erudit_custom_v1', []) || [], load(profileKey('custom_v2'), []) || []];
+  const sources = [load('erudit_custom_v1', []) || [], profile ? (load(profileKey('custom_v2'), []) || []) : []];
   const missing = [];
   sources.forEach((arr) => (arr || []).forEach((w) => {
     if (w && w.word && w.meaning && !have.has(w.id)) { missing.push(w); have.add(w.id); }
@@ -1115,9 +1115,9 @@ function bindUI() {
 async function init() {
   bindUI();
   applyTheme(document.documentElement.dataset.theme || localStorage.getItem('erudit_theme') || 'light');
+  loadSession(); // профиль читаем ДО загрузки слов: миграция старых данных его использует
   await loadWords();
 
-  loadSession();
   if (profile) {
     loadState();
     enterApp();
